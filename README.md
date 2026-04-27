@@ -153,6 +153,75 @@ Notes:
     TYPE=COMPLEX.
 ```
 
+## Examples
+
+These examples are executed when `README.md` is rendered from `README.Rmd`, so
+shown output is produced by the current binary instead of copied by hand.
+
+### Adjacent phased SNVs become `TYPE=MNV`
+
+Command:
+
+```bash
+target/release/phase_mnv_rs -r tests/fixtures/ref.fa --no-header -q tests/fixtures/phased_mnv.vcf
+```
+
+Output:
+
+```text
+chr1	1	.	AC	GT	.	PASS	TYPE=MNV;NVAR=2;NSNPS=2;END=2;SOURCE_POS=1,2;HAPS=2;PS=10	GT:PS	0|1:10
+chr1	4	.	TA	CG	.	PASS	TYPE=MNV;NVAR=2;NSNPS=2;END=5;SOURCE_POS=4,5;HAPS=1;PS=10	GT:PS	1|0:10
+chr1	6	.	CG	AT	.	PASS	TYPE=MNV;NVAR=2;NSNPS=2;END=7;SOURCE_POS=6,7;HAPS=1,2;PS=20	GT:PS	1|1:20
+```
+
+### Mixed SNV/indel blocks become `TYPE=COMPLEX`
+
+Command:
+
+```bash
+target/release/phase_mnv_rs -r tests/fixtures/ref.fa --no-header -q tests/fixtures/complex.vcf
+```
+
+Output:
+
+```text
+chr1	2	.	C	TG	.	PASS	TYPE=COMPLEX;NVAR=2;NSNPS=1;END=2;SOURCE_POS=1,2;HAPS=1;PS=30	GT:PS	1|0:30
+```
+
+### Rust/C byte-identity smoke test
+
+Command:
+
+```bash
+./tests/byte_identical_synthetic.sh target/release/phase_mnv_rs c/phase_mnv
+```
+
+Output:
+
+```text
+Rust and C outputs are byte-identical on explicit fixture tests/fixtures/byte_identity.vcf
+```
+
+### Optional local larger VCF example
+
+The committed README only runs tracked fixtures. To exercise a larger local VCF
+while rendering this README, provide explicit paths via environment variables;
+the rendered external-example output intentionally omits those paths.
+
+```bash
+PHASE_MNV_EXAMPLE_VCF=input.vcf.gz \
+PHASE_MNV_EXAMPLE_REF=ref.fa \
+PHASE_MNV_EXAMPLE_SAMPLE=S1 \
+make readme-external-example
+```
+
+Set `PHASE_MNV_EXAMPLE_VCF`, `PHASE_MNV_EXAMPLE_REF`, and
+`PHASE_MNV_EXAMPLE_SAMPLE`, then run `make readme-external-example`
+to run a local larger VCF through both binaries.
+
+This is intentionally disabled in the committed README so no local/private
+paths or data names are embedded.
+
 ## Test
 
 All CI tests use explicit files under `tests/fixtures/`:
@@ -202,15 +271,21 @@ VCF=input.vcf.gz REF=ref.fa SAMPLE=S1 make byte-test
 
 ## README generation
 
-`README.md` is generated from `README.Rmd` so the CLI help stays synchronized
-with the installed tools:
+`README.md` is generated from `README.Rmd` so the CLI help and fixture example
+outputs stay synchronized with the installed tools:
 
 ```bash
 make readme
 ```
 
 This requires R with the `knitr` package. The `readme` target builds both
-binaries first, then renders `README.Rmd`.
+binaries first, then renders `README.Rmd`. For a local larger VCF example, set
+`PHASE_MNV_EXAMPLE_VCF`, `PHASE_MNV_EXAMPLE_REF`, and
+`PHASE_MNV_EXAMPLE_SAMPLE`, then run:
+
+```bash
+make readme-external-example
+```
 
 ## Reference implementations
 

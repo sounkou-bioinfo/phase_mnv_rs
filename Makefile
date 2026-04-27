@@ -7,7 +7,7 @@ TARGET_ARG := $(if $(TARGET),--target $(TARGET),)
 RELEASE_BIN ?= target/release/phase_mnv_rs
 STATIC_BIN ?= target/$(shell $(CARGO) -vV | sed -n 's/^host: //p')/release/phase_mnv_rs
 
-.PHONY: release static-release install install-static clean test c c-test c-static byte-test readme check-readme
+.PHONY: release static-release install install-static clean test c c-test c-static byte-test readme readme-external-example check-readme
 
 release:
 	$(CARGO) build --release $(TARGET_ARG)
@@ -46,5 +46,9 @@ readme: release c
 	Rscript -e 'invisible(suppressWarnings(knitr::knit("README.Rmd", "README.md", quiet = TRUE)))'
 	perl -0pi -e 's/\A(# phase_mnv_rs)\n{3,}/$$1\n\n/' README.md
 
-check-readme: readme
+readme-external-example:
+	PHASE_MNV_RUN_EXTERNAL=1 $(MAKE) readme
+
+check-readme:
+	env -u PHASE_MNV_RUN_EXTERNAL -u PHASE_MNV_EXAMPLE_VCF -u PHASE_MNV_EXAMPLE_REF -u PHASE_MNV_EXAMPLE_SAMPLE $(MAKE) readme
 	git diff --exit-code README.md

@@ -3,18 +3,102 @@
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, comment = "", collapse = TRUE)
 
-run_tool <- function(cmd, args = "--help") {
-  if (!file.exists(cmd)) {
-    return(sprintf("%s not found. Run `make release` / `make c` before rendering README.md.", cmd))
+run_cmd <- function(cmd, args = character()) {
+  if (!file.exists(cmd) && !nzchar(Sys.which(cmd))) {
+    return(sprintf(
+      "%s not found. Run `make release` / `make c` before rendering README.md.",
+      cmd
+    ))
   }
   out <- suppressWarnings(system2(cmd, args, stdout = TRUE, stderr = TRUE))
+  status <- attr(out, "status")
+  if (!is.null(status) && status != 0) {
+    out <- c(out, sprintf("[exit status %s]", status))
+  }
   paste(out, collapse = "\n")
 }
+
+run_tool <- function(cmd, args = "--help") {
+  run_cmd(cmd, args)
+}
+
+phase_mnv_rs <- file.path("target", "release", "phase_mnv_rs")
+phase_mnv_c <- file.path("c", "phase_mnv")
+fixture_ref <- file.path("tests", "fixtures", "ref.fa")
 
 fence <- function(x) {
   cat("```text\n")
   cat(x)
   cat("\n```\n")
+}
+
+external_example <- function() {
+  if (!identical(Sys.getenv("PHASE_MNV_RUN_EXTERNAL"), "1")) {
+    cat(paste(
+      "Set `PHASE_MNV_EXAMPLE_VCF`, `PHASE_MNV_EXAMPLE_REF`, and",
+      "`PHASE_MNV_EXAMPLE_SAMPLE`, then run `make readme-external-example`",
+      "to run a local larger VCF through both binaries.",
+      "",
+      "This is intentionally disabled in the committed README so no local/private",
+      "paths or data names are embedded.",
+      sep = "\n"
+    ))
+    return(invisible(FALSE))
+  }
+
+  vcf <- Sys.getenv("PHASE_MNV_EXAMPLE_VCF")
+  ref <- Sys.getenv("PHASE_MNV_EXAMPLE_REF")
+  sample <- Sys.getenv("PHASE_MNV_EXAMPLE_SAMPLE")
+  missing <- names(which(!nzchar(c(
+    PHASE_MNV_EXAMPLE_VCF = vcf,
+    PHASE_MNV_EXAMPLE_REF = ref,
+    PHASE_MNV_EXAMPLE_SAMPLE = sample
+  ))))
+  if (length(missing)) {
+    stop("Missing required external README example variable(s): ", paste(missing, collapse = ", "))
+  }
+  if (!file.exists(vcf)) stop("External README example VCF does not exist")
+  if (!file.exists(ref)) stop("External README example reference FASTA does not exist")
+
+  tmp <- tempfile("phase-mnv-readme-")
+  dir.create(tmp)
+  on.exit(unlink(tmp, recursive = TRUE), add = TRUE)
+  rs_out <- file.path(tmp, "rust.vcf")
+  c_out <- file.path(tmp, "c.vcf")
+
+  rs <- suppressWarnings(system2(
+    phase_mnv_rs,
+    c("-q", "-r", ref, "-s", sample, "-o", rs_out, vcf),
+    stdout = TRUE,
+    stderr = TRUE
+  ))
+  if (!is.null(attr(rs, "status")) && attr(rs, "status") != 0) {
+    stop("Rust external README example failed: ", paste(rs, collapse = "\n"))
+  }
+
+  cc <- suppressWarnings(system2(
+    phase_mnv_c,
+    c("-q", "-r", ref, "-s", sample, "-o", c_out, vcf),
+    stdout = TRUE,
+    stderr = TRUE
+  ))
+  if (!is.null(attr(cc, "status")) && attr(cc, "status") != 0) {
+    stop("C external README example failed: ", paste(cc, collapse = "\n"))
+  }
+
+  cmp <- suppressWarnings(system2("cmp", c(rs_out, c_out), stdout = TRUE, stderr = TRUE))
+  if (!is.null(attr(cmp, "status")) && attr(cmp, "status") != 0) {
+    stop("External README example Rust/C outputs differ")
+  }
+
+  lines <- readLines(rs_out, warn = FALSE)
+  n_records <- sum(!startsWith(lines, "#"))
+  fence(paste(
+    "external VCF byte-identical Rust/C example passed",
+    sprintf("emitted_records=%d", n_records),
+    sep = "\n"
+  ))
+  invisible(TRUE)
 }
 ```
 
@@ -114,7 +198,80 @@ fence(run_tool(file.path("target", "release", "phase_mnv_rs")))
 ### C binary (`phase_mnv`)
 
 ```{r c-help, results='asis'}
-fence(run_tool(file.path("c", "phase_mnv")))
+fence(run_tool(phase_mnv_c))
+```
+
+## Examples
+
+These examples are executed when `README.md` is rendered from `README.Rmd`, so
+shown output is produced by the current binary instead of copied by hand.
+
+### Adjacent phased SNVs become `TYPE=MNV`
+
+Command:
+
+```bash
+target/release/phase_mnv_rs -r tests/fixtures/ref.fa --no-header -q tests/fixtures/phased_mnv.vcf
+```
+
+Output:
+
+```{r example-mnv, results='asis'}
+fence(run_tool(
+  phase_mnv_rs,
+  c("-r", fixture_ref, "--no-header", "-q", file.path("tests", "fixtures", "phased_mnv.vcf"))
+))
+```
+
+### Mixed SNV/indel blocks become `TYPE=COMPLEX`
+
+Command:
+
+```bash
+target/release/phase_mnv_rs -r tests/fixtures/ref.fa --no-header -q tests/fixtures/complex.vcf
+```
+
+Output:
+
+```{r example-complex, results='asis'}
+fence(run_tool(
+  phase_mnv_rs,
+  c("-r", fixture_ref, "--no-header", "-q", file.path("tests", "fixtures", "complex.vcf"))
+))
+```
+
+### Rust/C byte-identity smoke test
+
+Command:
+
+```bash
+./tests/byte_identical_synthetic.sh target/release/phase_mnv_rs c/phase_mnv
+```
+
+Output:
+
+```{r example-byte-identity, results='asis'}
+fence(run_tool(
+  file.path("tests", "byte_identical_synthetic.sh"),
+  c(phase_mnv_rs, phase_mnv_c)
+))
+```
+
+### Optional local larger VCF example
+
+The committed README only runs tracked fixtures. To exercise a larger local VCF
+while rendering this README, provide explicit paths via environment variables;
+the rendered external-example output intentionally omits those paths.
+
+```bash
+PHASE_MNV_EXAMPLE_VCF=input.vcf.gz \
+PHASE_MNV_EXAMPLE_REF=ref.fa \
+PHASE_MNV_EXAMPLE_SAMPLE=S1 \
+make readme-external-example
+```
+
+```{r example-external, results='asis'}
+external_example()
 ```
 
 ## Test
@@ -166,15 +323,21 @@ VCF=input.vcf.gz REF=ref.fa SAMPLE=S1 make byte-test
 
 ## README generation
 
-`README.md` is generated from `README.Rmd` so the CLI help stays synchronized
-with the installed tools:
+`README.md` is generated from `README.Rmd` so the CLI help and fixture example
+outputs stay synchronized with the installed tools:
 
 ```bash
 make readme
 ```
 
 This requires R with the `knitr` package. The `readme` target builds both
-binaries first, then renders `README.Rmd`.
+binaries first, then renders `README.Rmd`. For a local larger VCF example, set
+`PHASE_MNV_EXAMPLE_VCF`, `PHASE_MNV_EXAMPLE_REF`, and
+`PHASE_MNV_EXAMPLE_SAMPLE`, then run:
+
+```bash
+make readme-external-example
+```
 
 ## Reference implementations
 

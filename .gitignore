@@ -11,5 +11,7 @@
 !/tests/fixtures/*.vcf
 *.bcf.csi
 *.vcf.gz.tbi
+*.vcf.gz.csi
+*.fai
 README.html
 .DS_Store
