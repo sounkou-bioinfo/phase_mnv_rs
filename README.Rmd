@@ -1,5 +1,23 @@
 # phase_mnv_rs
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, comment = "", collapse = TRUE)
+
+run_tool <- function(cmd, args = "--help") {
+  if (!file.exists(cmd)) {
+    return(sprintf("%s not found. Run `make release` / `make c` before rendering README.md.", cmd))
+  }
+  out <- suppressWarnings(system2(cmd, args, stdout = TRUE, stderr = TRUE))
+  paste(out, collapse = "\n")
+}
+
+fence <- function(x) {
+  cat("```text\n")
+  cat(x)
+  cat("\n```\n")
+}
+```
+
 Phased VCF/BCF haplotype merger that emits normalized `MNV` or `COMPLEX`
 records from variants carried on the same phased haplotype.
 
@@ -89,68 +107,14 @@ The help text below is generated directly from the built binaries when
 
 ### Rust binary (`phase_mnv_rs`)
 
-```text
-usage: phase_mnv -r ref.fa [options] input.vcf|input.bcf
-
-Build minimal merged MNV/complex records from phased variants in one sample.
-
-required:
-  -r, --reference FILE   Indexed or indexable FASTA reference
-
-options:
-  -s, --sample NAME      Sample to read (default: first sample)
-  -o, --output FILE      Output VCF path (default: stdout; plain text)
-  -g, --max-gap N        Allow up to N unchanged reference bases between
-                        phased variants when building one merged call (default: 0)
-      --min-vars N       Minimum source variants per emitted call (default: 2)
-      --min-snvs N       Alias for --min-vars
-      --no-ref-check     Do not fail when VCF REF differs from FASTA
-      --no-header        Suppress VCF header
-  -q, --quiet            Suppress summary on stderr
-  -h, --help             Show this help
-
-Notes:
-  * Only phased diploid GT (e.g. 0|1, 1|0, 1|1) is used. Unphased
-    genotypes and symbolic/breakend/non-DNA alleles are skipped.
-  * FORMAT/PS is honored when present; variants are only merged within the
-    same phase set. If PS is absent, the phase separator and proximity
-    define the merge block.
-  * With the default --max-gap 0, only adjacent phased variants are
-    merged. Pure SNV blocks are TYPE=MNV; blocks containing indels are
-    TYPE=COMPLEX.
+```{r rust-help, results='asis'}
+fence(run_tool(file.path("target", "release", "phase_mnv_rs")))
 ```
 
 ### C binary (`phase_mnv`)
 
-```text
-usage: phase_mnv -r ref.fa [options] input.vcf|input.bcf
-
-Build minimal merged MNV/complex records from phased variants in one sample.
-
-required:
-  -r, --reference FILE   Indexed or indexable FASTA reference
-
-options:
-  -s, --sample NAME      Sample to read (default: first sample)
-  -o, --output FILE      Output VCF path (default: stdout; plain text)
-  -g, --max-gap N        Allow up to N unchanged reference bases between
-                        phased variants when building one merged call (default: 0)
-      --min-vars N       Minimum source variants per emitted call (default: 2)
-      --min-snvs N       Alias for --min-vars
-      --no-ref-check     Do not fail when VCF REF differs from FASTA
-      --no-header        Suppress VCF header
-  -q, --quiet            Suppress summary on stderr
-  -h, --help             Show this help
-
-Notes:
-  * Only phased diploid GT (e.g. 0|1, 1|0, 1|1) is used. Unphased
-    genotypes and symbolic/breakend/non-DNA alleles are skipped.
-  * FORMAT/PS is honored when present; variants are only merged within the
-    same phase set. If PS is absent, the phase separator and proximity
-    define the merge block.
-  * With the default --max-gap 0, only adjacent phased variants are
-    merged. Pure SNV blocks are TYPE=MNV; blocks containing indels are
-    TYPE=COMPLEX.
+```{r c-help, results='asis'}
+fence(run_tool(file.path("c", "phase_mnv")))
 ```
 
 ## Test

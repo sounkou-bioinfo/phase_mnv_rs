@@ -1,6 +1,7 @@
 /target/
 /dist/
 /.build/
+/reference_impls/
 /c/phase_mnv
 *.tmp
 *.log
@@ -10,4 +11,5 @@
 !/tests/fixtures/*.vcf
 *.bcf.csi
 *.vcf.gz.tbi
+README.html
 .DS_Store
