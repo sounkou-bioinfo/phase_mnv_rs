@@ -9,6 +9,7 @@
 *.bcf
 *.vcf.gz
 !/tests/fixtures/*.vcf
+!/tests/fixtures/*.vcf.gz
 *.bcf.csi
 *.vcf.gz.tbi
 *.vcf.gz.csi

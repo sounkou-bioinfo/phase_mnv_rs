@@ -236,18 +236,32 @@ tests/fixtures/gap.max1.expected.body.vcf
 tests/fixtures/complex.vcf
 tests/fixtures/complex.expected.body.vcf
 tests/fixtures/byte_identity.vcf
+tests/fixtures/ref_mismatch.vcf
+tests/fixtures/truncated.vcf.gz
 ```
 
-Run Rust behavior tests:
+Run Rust behavior and negative/failure-mode tests:
 
 ```bash
 make test
 ```
 
-Run C behavior tests:
+Run only Rust negative/failure-mode tests:
+
+```bash
+make negative-test
+```
+
+Run C behavior and negative/failure-mode tests:
 
 ```bash
 make c-test
+```
+
+Run only C negative/failure-mode tests:
+
+```bash
+make c-negative-test
 ```
 
 Compare Rust and C byte-for-byte on the explicit byte-identity fixture:
@@ -312,7 +326,7 @@ GitHub Actions builds and tests both implementations on Linux and macOS:
 
 - Rust release/static where supported
 - C binary with bundled static `libhts.a`
-- behavior tests for both binaries
+- behavior and negative/failure-mode tests for both binaries
 - byte-identical Rust-vs-C synthetic fixture test
 - binary artifact upload with SHA256 sums
 

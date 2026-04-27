@@ -310,7 +310,30 @@ fn collect_header_info(reader: &bcf::Reader, sample_idx: usize) -> Result<Header
     })
 }
 
+fn preflight_vcf_header(path: &str) -> Result<(), String> {
+    let c_path = CString::new(path.as_bytes())
+        .map_err(|_| format!("input path contains NUL byte: {path}"))?;
+    let mode = CString::new("r").expect("literal contains no NUL");
+    unsafe {
+        let fp = htslib::hts_open(c_path.as_ptr(), mode.as_ptr());
+        if fp.is_null() {
+            return Err(format!("cannot open input '{path}'"));
+        }
+        let hdr = htslib::bcf_hdr_read(fp);
+        if hdr.is_null() {
+            htslib::hts_close(fp);
+            return Err("failed to read VCF/BCF header".to_string());
+        }
+        htslib::bcf_hdr_destroy(hdr);
+        if htslib::hts_close(fp) != 0 {
+            return Err(format!("failed to close input '{path}' after header check"));
+        }
+    }
+    Ok(())
+}
+
 fn read_observations(cfg: &Config) -> Result<(HeaderInfo, Vec<Obs>, Stats), String> {
+    preflight_vcf_header(&cfg.input_path)?;
     let mut reader = bcf::Reader::from_path(&cfg.input_path)
         .map_err(|e| format!("cannot open input '{}': {}", cfg.input_path, e))?;
     let sample_count = reader.header().sample_count();

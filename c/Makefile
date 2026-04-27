@@ -53,3 +53,4 @@ uninstall:
 
 test: phase_mnv
 	../tests/test_phase_mnv.sh ./phase_mnv
+	../tests/test_negative.sh ./phase_mnv

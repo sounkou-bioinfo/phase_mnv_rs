@@ -69,7 +69,9 @@ jobs:
 
       - name: Test Rust binary
         shell: bash
-        run: ./tests/test_phase_mnv.sh "${{ steps.rust-bin.outputs.path }}"
+        run: |
+          ./tests/test_phase_mnv.sh "${{ steps.rust-bin.outputs.path }}"
+          ./tests/test_negative.sh "${{ steps.rust-bin.outputs.path }}"
 
       - name: Build C static/bundled-htslib binary
         shell: bash
@@ -87,7 +89,9 @@ jobs:
 
       - name: Test C binary
         shell: bash
-        run: ./tests/test_phase_mnv.sh c/phase_mnv
+        run: |
+          ./tests/test_phase_mnv.sh c/phase_mnv
+          ./tests/test_negative.sh c/phase_mnv
 
       - name: Check generated README is up to date
         shell: bash

@@ -339,7 +339,8 @@ static void read_observations(const Config *cfg, bcf_hdr_t **out_hdr, int *out_s
     int nps_arr = 0;
     int nsamples = bcf_hdr_nsamples(hdr);
 
-    while (bcf_read(in, hdr, rec) == 0) {
+    int read_ret;
+    while ((read_ret = bcf_read(in, hdr, rec)) == 0) {
         st->records++;
         bcf_unpack(rec, BCF_UN_STR | BCF_UN_FMT);
 
@@ -416,6 +417,16 @@ static void read_observations(const Config *cfg, bcf_hdr_t **out_hdr, int *out_s
             obs_push(obs, x);
             st->observations++;
         }
+    }
+
+    if (read_ret != -1) {
+        free(gt_arr);
+        free(ps_arr);
+        bcf_destroy(rec);
+        hts_close(in);
+        bcf_hdr_destroy(hdr);
+        free_obs(obs);
+        die("failed to read VCF/BCF record");
     }
 
     free(gt_arr);
