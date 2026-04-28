@@ -21,6 +21,16 @@ ref="$tmp/ref.fa"
 diff -u "$fixtures/read_phase.expected.body.vcf" "$tmp/out.vcf"
 
 "$bin" \
+  -q \
+  -r "$ref" \
+  -s S1 \
+  --phase-from-bam "$fixtures/read_phase.bam" \
+  --phase-algorithm greedy \
+  --no-header \
+  "$fixtures/read_phase.vcf" > "$tmp/out.greedy.vcf"
+diff -u "$fixtures/read_phase.expected.body.vcf" "$tmp/out.greedy.vcf"
+
+"$bin" \
   -r "$ref" \
   -s S1 \
   --phase-from-bam "$fixtures/read_phase.bam" \
@@ -28,6 +38,8 @@ diff -u "$fixtures/read_phase.expected.body.vcf" "$tmp/out.vcf"
   "$fixtures/read_phase.vcf" > "$tmp/out.with-summary.vcf" 2> "$tmp/summary.err"
 
 grep -q 'phase_mnv: bam_phase input=' "$tmp/summary.err"
+grep -q 'algorithm=mec' "$tmp/summary.err"
+grep -q 'selected_reads=4' "$tmp/summary.err"
 grep -q 'candidates=4' "$tmp/summary.err"
 grep -q 'phased_variants=4' "$tmp/summary.err"
 grep -q 'emitted_calls=2' "$tmp/summary.err"

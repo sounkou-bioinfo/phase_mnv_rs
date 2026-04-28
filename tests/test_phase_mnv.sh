@@ -18,6 +18,11 @@ grep -q "Multi-allelic input sites use the ALT allele selected" "$help"
 grep -q "unselected ALTs are ignored and output" "$help"
 grep -q "Symbolic, breakend, spanning-deletion" "$help"
 grep -q "currently not barriers" "$help"
+has_nirvana_codon=0
+if grep -q -- "--mnv-algorithm MODE" "$help"; then
+  has_nirvana_codon=1
+  grep -q "nirvana-codon" "$help"
+fi
 grep -q "output=stdout for VCF stdout" "$help"
 
 python3 "$repo_root/scripts/unphase_vcf.py" "$fixtures/phased_mnv.vcf" > "$tmp/unphased.vcf"
@@ -61,5 +66,12 @@ diff -u "$fixtures/symbolic.max1.expected.body.vcf" "$tmp/symbolic.body"
 run_body "$fixtures/n_base.vcf" "$tmp/n_base.body" --warn-on-n 2> "$tmp/n_base.err"
 diff -u "$fixtures/n_base.expected.body.vcf" "$tmp/n_base.body"
 grep -q "warning: N base in selected allele at chr1:2 hap=2 REF=C ALT=N" "$tmp/n_base.err"
+
+if [[ "$has_nirvana_codon" -eq 1 ]]; then
+  run_body "$fixtures/nirvana_codon.vcf" "$tmp/nirvana_codon.body" \
+    --mnv-algorithm nirvana-codon \
+    --codon-map "$fixtures/nirvana_codon.codons.tsv"
+  diff -u "$fixtures/nirvana_codon.expected.body.vcf" "$tmp/nirvana_codon.body"
+fi
 
 echo "phase_mnv tests passed"

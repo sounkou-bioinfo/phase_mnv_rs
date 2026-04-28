@@ -29,16 +29,29 @@ experimental read-backed phasing mode:
 ```
 
 In this mode input `GT` phase separators and `FORMAT/PS` values are ignored.
-The Rust implementation uses `rust-htslib` to read an indexed BAM/CRAM, extracts
-per-read allele observations at heterozygous diploid VCF records, builds
-read-supported pairwise allele co-occurrence constraints, greedily constructs
-connected parity components, assigns deterministic `PS` values from the first
-variant in each component, and then runs the normal MNV/COMPLEX construction.
+The Rust implementation uses `rust-htslib` to read an indexed BAM/CRAM and
+extracts per-read allele observations at heterozygous diploid VCF records.
 
-This mode is inspired by WhatsHap's read-backed phasing model, but it is not yet
-a full implementation of WhatsHap's MEC/PedMEC optimization or all WhatsHap
-options. The compatibility contract is currently the tracked Rust fixture and
-local validation against WhatsHap on real data, not byte identity with WhatsHap.
+The default phasing algorithm is now:
+
+```bash
+--phase-algorithm mec --phase-max-coverage 15
+```
+
+This performs deterministic read selection to cap per-variant read coverage,
+builds read-connected components, and solves the exact weighted diploid
+single-sample MEC objective per component by dynamic programming over active-read
+bipartitions. The earlier pairwise parity heuristic remains available as:
+
+```bash
+--phase-algorithm greedy
+```
+
+This mode is inspired by WhatsHap's non-pedigree read-backed phasing model, but
+it is still not a full WhatsHap clone: pedigree/PedMEC, all read-selection
+heuristics, all CLI options, and switch-error validated equivalence remain future
+work. The compatibility contract is currently the tracked Rust fixture and local
+validation against WhatsHap on real data, not byte identity with WhatsHap.
 
 For comparison against the established upstream phaser,
 `scripts/phase_from_bam_then_mnv.sh` provides a local workflow that:
@@ -55,8 +68,8 @@ FORMAT values. It is a preparation step for external phasing comparisons.
 
 ## Output model
 
-The default `--emit mnv` mode writes only derived biallelic merged haplotype
-records, not the whole input VCF/BCF.
+The default `--emit mnv --mnv-algorithm proximity` mode writes only derived
+biallelic merged haplotype records, not the whole input VCF/BCF.
 
 - Output records are biallelic merged haplotype records.
 - Pure source-SNV blocks emit `TYPE=MNV`.
@@ -80,6 +93,33 @@ record and keeps the original input header by duplicating it through htslib, the
 appending `phase_mnv` metadata/header records. With `--phase-from-bam` it updates
 `FORMAT/GT` and `FORMAT/PS` for phased one-sample inputs; it does not construct
 MNV/COMPLEX records in that mode.
+
+## Nirvana-style codon-aware SNV recomposition
+
+The Rust binary has an initial Nirvana-inspired MNV recomposition mode:
+
+```bash
+--mnv-algorithm nirvana-codon --codon-map codons.tsv
+```
+
+The codon map is a small BED-like text file:
+
+```text
+CHROM START0 END0 TRANSCRIPT CODON_ID [ignored...]
+```
+
+`START0`/`END0` are 0-based half-open codon spans. A phased SNV observation may
+belong to multiple transcript/codon keys. In this first slice, the tool emits an
+MNV only when at least `--min-vars` phased SNV observations on the same haplotype
+and phase set share a codon key. Indels and non-SNV observations are ignored by
+this mode, so emitted calls are `TYPE=MNV` only.
+
+This captures Nirvana's core same-codon SNV seed rule in a lightweight,
+validation-friendly form without vendoring Nirvana transcript caches. Full
+Nirvana parity still requires transcript-cache integration, adjacent-codon
+aggregation, sample-specific multi-sample recomposition, homozygous-variant
+availability across phase sets, unsupported-overlap barriers, and exact
+`linkedVids`/QUAL/FILTER/GQ behavior.
 
 ## Multi-allelic input sites
 
@@ -191,7 +231,7 @@ explicit output destination:
 
 ```text
 phase_mnv: input=... reference=... output=stdout sample=...
-phase_mnv: settings max_gap=... min_vars=... unsupported_alleles=... warn_on_n=... no_ref_check=... no_header=... output_format=... threads=... emit=...
+phase_mnv: settings max_gap=... min_vars=... unsupported_alleles=... warn_on_n=... no_ref_check=... no_header=... output_format=... threads=... emit=... mnv_algorithm=...
 phase_mnv: records=... phased_records=... haplotype_variant_observations=... emitted_calls=...
 phase_mnv: skipped no_gt=... non_diploid=... missing_gt=... unphased=... ref_hap_alleles=...
 phase_mnv: unsupported ref_non_dna=... alt_out_of_range=... alt_symbolic_or_breakend=... alt_spanning_deletion=... alt_non_dna=... alt_same_as_ref=... unsupported_alt_total=...

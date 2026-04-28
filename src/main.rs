@@ -44,6 +44,36 @@ enum EmitMode {
     AllSites,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseAlgorithm {
+    Mec,
+    Greedy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MnvAlgorithm {
+    Proximity,
+    NirvanaCodon,
+}
+
+impl MnvAlgorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            MnvAlgorithm::Proximity => "proximity",
+            MnvAlgorithm::NirvanaCodon => "nirvana-codon",
+        }
+    }
+}
+
+impl PhaseAlgorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            PhaseAlgorithm::Mec => "mec",
+            PhaseAlgorithm::Greedy => "greedy",
+        }
+    }
+}
+
 impl EmitMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -72,8 +102,12 @@ struct Config {
     phase_bam_path: Option<String>,
     phase_min_mapq: u8,
     phase_min_baseq: u8,
+    phase_algorithm: PhaseAlgorithm,
+    phase_max_coverage: usize,
     threads: usize,
     emit_mode: EmitMode,
+    mnv_algorithm: MnvAlgorithm,
+    codon_map_path: Option<String>,
     max_gap: i64,
     min_variants: usize,
     unsupported_alleles: UnsupportedAllelesPolicy,
@@ -100,6 +134,7 @@ struct Obs {
     ref_allele: String,
     alt_allele: String,
     is_snv: bool,
+    codon_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +165,7 @@ struct Stats {
     bam_phase_phased_variants: u64,
     bam_phase_unphased_variants: u64,
     bam_phase_conflicts: u64,
+    bam_phase_selected_reads: u64,
     skipped_no_gt: u64,
     skipped_not_diploid: u64,
     skipped_missing_gt: u64,
@@ -161,6 +197,49 @@ struct PhaseCandidate {
 struct PhaseAssignment {
     ps: i64,
     rel: u8,
+}
+
+#[derive(Debug, Clone)]
+struct ReadPhaseCall {
+    calls: Vec<(usize, u8, u8)>,
+    order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LocalReadCall {
+    var: usize,
+    allele: u8,
+    qual: u8,
+}
+
+#[derive(Debug, Clone)]
+struct LocalRead {
+    calls: Vec<LocalReadCall>,
+}
+
+#[derive(Debug, Clone)]
+struct CodonInterval {
+    start: i64,
+    end: i64,
+    key: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodonMap {
+    by_chrom: HashMap<String, Vec<CodonInterval>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MecTraceState {
+    cost: u64,
+    prev_mask: Option<u64>,
+    orientation: u8,
+}
+
+#[derive(Debug, Clone)]
+struct MecTraceColumn {
+    active_reads: Vec<usize>,
+    states: HashMap<u64, MecTraceState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -301,6 +380,11 @@ fn print_usage<W: Write>(mut out: W) -> io::Result<()> {
             "                        updates GT/PS when used with --phase-from-bam\n",
             "  -g, --max-gap N        Allow up to N unchanged reference bases between\n",
             "                        phased variants when building one merged call (default: 0)\n",
+            "      --mnv-algorithm MODE\n",
+            "                        MNV construction: proximity (default) or\n",
+            "                        nirvana-codon (SNV-only same-codon seed mode)\n",
+            "      --codon-map FILE   BED-like codon map for --mnv-algorithm nirvana-codon:\n",
+            "                        CHROM START0 END0 TRANSCRIPT CODON_ID [ignored...]\n",
             "      --min-vars N       Minimum source variants per emitted call (default: 2)\n",
             "      --min-snvs N       Alias for --min-vars\n",
             "      --unsupported-alleles MODE\n",
@@ -309,6 +393,11 @@ fn print_usage<W: Write>(mut out: W) -> io::Result<()> {
             "      --phase-from-bam FILE\n",
             "                        Experimental Rust read-backed phasing from indexed BAM/CRAM\n",
             "                        before MNV construction; input GT phase/PS is ignored\n",
+            "      --phase-algorithm MODE\n",
+            "                        BAM phasing algorithm: mec or greedy (default: mec)\n",
+            "      --phase-max-coverage N\n",
+            "                        Maximum selected read coverage per variant for MEC phasing\n",
+            "                        (default: 15; WhatsHap-style downsampling guard)\n",
             "      --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20)\n",
             "      --phase-min-baseq N Minimum base quality for --phase-from-bam (default: 13)\n",
             "      --warn-on-n        Warn when a selected REF/ALT allele contains N\n",
@@ -331,11 +420,13 @@ fn print_usage<W: Write>(mut out: W) -> io::Result<()> {
             "    same phase set. If PS is absent, the phase separator and proximity\n",
             "    define the merge block.\n",
             "  * --phase-from-bam is a Rust-only experimental phaser inspired by\n",
-            "    WhatsHap's read-backed phasing model. It currently phases variants by\n",
-            "    read-supported allele co-occurrence in connected components.\n",
-            "  * With the default --max-gap 0, only adjacent phased variants are\n",
-            "    merged. Pure SNV blocks are TYPE=MNV; blocks containing indels are\n",
-            "    TYPE=COMPLEX.\n",
+            "    WhatsHap's read-backed phasing model. The default mec algorithm solves\n",
+            "    exact diploid single-sample MEC per connected component after deterministic\n",
+            "    read selection; greedy keeps the earlier pairwise parity heuristic.\n",
+            "  * With the default --max-gap 0 and --mnv-algorithm proximity, only\n",
+            "    adjacent phased variants are merged. Pure SNV blocks are TYPE=MNV;\n",
+            "    blocks containing indels are TYPE=COMPLEX. nirvana-codon mode only\n",
+            "    recomposes phased SNVs sharing a codon key from --codon-map.\n",
             "  * Output format is inferred from -o/--output. BCF output always includes\n",
             "    a VCF/BCF header even if --no-header is set.\n",
             "  * --emit all-sites keeps the original VCF/BCF header via htslib and\n",
@@ -373,6 +464,22 @@ fn parse_emit_mode(s: &str) -> EmitMode {
     }
 }
 
+fn parse_phase_algorithm(s: &str) -> PhaseAlgorithm {
+    match s {
+        "mec" | "whap" | "whatshap" => PhaseAlgorithm::Mec,
+        "greedy" => PhaseAlgorithm::Greedy,
+        _ => die("--phase-algorithm must be one of: mec, greedy"),
+    }
+}
+
+fn parse_mnv_algorithm(s: &str) -> MnvAlgorithm {
+    match s {
+        "proximity" => MnvAlgorithm::Proximity,
+        "nirvana-codon" | "codon" => MnvAlgorithm::NirvanaCodon,
+        _ => die("--mnv-algorithm must be one of: proximity, nirvana-codon"),
+    }
+}
+
 fn parse_args() -> Config {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut fasta_path: Option<String> = None;
@@ -381,8 +488,12 @@ fn parse_args() -> Config {
     let mut phase_bam_path: Option<String> = None;
     let mut phase_min_mapq = 20u8;
     let mut phase_min_baseq = 13u8;
+    let mut phase_algorithm = PhaseAlgorithm::Mec;
+    let mut phase_max_coverage = 15usize;
     let mut threads = 1usize;
     let mut emit_mode = EmitMode::Mnv;
+    let mut mnv_algorithm = MnvAlgorithm::Proximity;
+    let mut codon_map_path: Option<String> = None;
     let mut max_gap = 0i64;
     let mut min_variants = 2usize;
     let mut unsupported_alleles = UnsupportedAllelesPolicy::Skip;
@@ -446,6 +557,20 @@ fn parse_args() -> Config {
                 }
                 emit_mode = parse_emit_mode(&args[i]);
             }
+            "--mnv-algorithm" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--mnv-algorithm requires an argument");
+                }
+                mnv_algorithm = parse_mnv_algorithm(&args[i]);
+            }
+            "--codon-map" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--codon-map requires an argument");
+                }
+                codon_map_path = Some(args[i].clone());
+            }
             "--min-vars" | "--min-snvs" => {
                 i += 1;
                 if i >= args.len() {
@@ -470,6 +595,24 @@ fn parse_args() -> Config {
                     die("--phase-from-bam requires an argument");
                 }
                 phase_bam_path = Some(args[i].clone());
+            }
+            "--phase-algorithm" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--phase-algorithm requires an argument");
+                }
+                phase_algorithm = parse_phase_algorithm(&args[i]);
+            }
+            "--phase-max-coverage" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--phase-max-coverage requires an argument");
+                }
+                let value = parse_i64(&args[i], "--phase-max-coverage");
+                if !(1..=20).contains(&value) {
+                    die("--phase-max-coverage must be between 1 and 20");
+                }
+                phase_max_coverage = value as usize;
             }
             "--phase-min-mapq" => {
                 i += 1;
@@ -520,6 +663,9 @@ fn parse_args() -> Config {
         let _ = print_usage(io::stderr());
         die("exactly one input VCF/BCF is required");
     }
+    if mnv_algorithm == MnvAlgorithm::NirvanaCodon && codon_map_path.is_none() {
+        die("--mnv-algorithm nirvana-codon requires --codon-map");
+    }
 
     Config {
         input_path: positional.remove(0),
@@ -529,8 +675,12 @@ fn parse_args() -> Config {
         phase_bam_path,
         phase_min_mapq,
         phase_min_baseq,
+        phase_algorithm,
+        phase_max_coverage,
         threads,
         emit_mode,
+        mnv_algorithm,
+        codon_map_path,
         max_gap,
         min_variants,
         unsupported_alleles,
@@ -572,6 +722,13 @@ fn unsupported_alt_kind(s: &[u8]) -> &'static str {
     }
 }
 
+fn phase_model_name(cfg: &Config) -> &'static str {
+    match cfg.phase_algorithm {
+        PhaseAlgorithm::Mec => "experimental_diploid_mec_dp_read_selection",
+        PhaseAlgorithm::Greedy => "experimental_read_linkage_greedy_parity",
+    }
+}
+
 fn output_label(cfg: &Config) -> &str {
     match cfg.output_path.as_deref() {
         None | Some("-") => "stdout",
@@ -593,6 +750,80 @@ fn infer_output_kind(cfg: &Config) -> OutputKind {
             }
         }
     }
+}
+
+impl CodonMap {
+    fn keys_for(&self, chrom: &str, pos1: i64) -> Vec<String> {
+        let Some(intervals) = self.by_chrom.get(chrom) else {
+            return Vec::new();
+        };
+        intervals
+            .iter()
+            .filter(|iv| iv.start <= pos1 && pos1 <= iv.end)
+            .map(|iv| iv.key.clone())
+            .collect()
+    }
+}
+
+fn load_codon_map(path: &str) -> Result<CodonMap, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read codon map '{}': {}", path, e))?;
+    let mut map = CodonMap::default();
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 {
+            return Err(format!(
+                "invalid codon map '{}': line {} has fewer than 5 fields",
+                path,
+                line_no + 1
+            ));
+        }
+        let start0 = fields[1].parse::<i64>().map_err(|_| {
+            format!(
+                "invalid codon map '{}': line {} START0 is not an integer",
+                path,
+                line_no + 1
+            )
+        })?;
+        let end0 = fields[2].parse::<i64>().map_err(|_| {
+            format!(
+                "invalid codon map '{}': line {} END0 is not an integer",
+                path,
+                line_no + 1
+            )
+        })?;
+        if start0 < 0 || end0 <= start0 {
+            return Err(format!(
+                "invalid codon map '{}': line {} requires 0 <= START0 < END0",
+                path,
+                line_no + 1
+            ));
+        }
+        let key = format!("{}:{}", fields[3], fields[4]);
+        map.by_chrom
+            .entry(fields[0].to_string())
+            .or_default()
+            .push(CodonInterval {
+                start: start0 + 1,
+                end: end0,
+                key,
+            });
+    }
+    for intervals in map.by_chrom.values_mut() {
+        intervals.sort_by_key(|iv| (iv.start, iv.end));
+    }
+    Ok(map)
+}
+
+fn load_optional_codon_map(cfg: &Config) -> Result<Option<CodonMap>, String> {
+    cfg.codon_map_path
+        .as_deref()
+        .map(load_codon_map)
+        .transpose()
 }
 
 fn uppercase_ascii_string(s: &[u8]) -> String {
@@ -740,33 +971,48 @@ fn read_events(record: &bam::Record) -> HashMap<i64, ReadEvent> {
     events
 }
 
+fn phase_quality(q: u8) -> u8 {
+    if q == 255 {
+        60
+    } else {
+        q.clamp(1, 60)
+    }
+}
+
 fn read_allele_for_candidate(
     events: &HashMap<i64, ReadEvent>,
     candidate: &PhaseCandidate,
     min_baseq: u8,
-) -> Option<String> {
+) -> Option<(String, u8)> {
     let mut allele = Vec::new();
+    let mut min_q = 255u8;
     let start0 = candidate.pos - 1;
     let ref_len = candidate.alleles.first()?.len() as i64;
     for pos0 in start0..start0 + ref_len {
         let event = events.get(&pos0)?;
         if let Some(base) = event.base {
-            if event.qual.unwrap_or(0) < min_baseq {
+            let q = event.qual.unwrap_or(0);
+            if q < min_baseq {
                 return None;
             }
+            min_q = min_q.min(q);
             allele.push(base);
         }
         for &(base, q) in &event.insertion_after {
             if q < min_baseq {
                 return None;
             }
+            min_q = min_q.min(q);
             allele.push(base);
         }
     }
     if allele.is_empty() {
         None
     } else {
-        Some(String::from_utf8_lossy(&allele).into_owned())
+        Some((
+            String::from_utf8_lossy(&allele).into_owned(),
+            phase_quality(min_q),
+        ))
     }
 }
 
@@ -775,7 +1021,7 @@ fn collect_read_phase_calls(
     candidates: &[PhaseCandidate],
     candidates_by_pos0: &HashMap<i64, Vec<usize>>,
     min_baseq: u8,
-) -> Vec<(usize, u8)> {
+) -> Vec<(usize, u8, u8)> {
     let events = read_events(record);
     if events.is_empty() {
         return Vec::new();
@@ -788,35 +1034,34 @@ fn collect_read_phase_calls(
         };
         for &idx in indices {
             let candidate = &candidates[idx];
-            let Some(read_allele) = read_allele_for_candidate(&events, candidate, min_baseq) else {
+            let Some((read_allele, qual)) =
+                read_allele_for_candidate(&events, candidate, min_baseq)
+            else {
                 continue;
             };
             let allele0 = &candidate.alleles[candidate.input_order_alleles[0] as usize];
             let allele1 = &candidate.alleles[candidate.input_order_alleles[1] as usize];
             if read_allele.eq_ignore_ascii_case(allele0) {
-                calls.push((idx, 0));
+                calls.push((idx, 0, qual));
             } else if read_allele.eq_ignore_ascii_case(allele1) {
-                calls.push((idx, 1));
+                calls.push((idx, 1, qual));
             }
         }
     }
 
-    calls.sort_by_key(|&(idx, _)| idx);
-    calls.dedup_by_key(|(idx, _)| *idx);
+    calls.sort_by_key(|&(idx, _, _)| idx);
+    calls.dedup_by_key(|(idx, _, _)| *idx);
     calls
 }
 
-fn phase_candidates_from_bam(
+fn collect_bam_phase_read_calls(
     cfg: &Config,
     candidates: &[PhaseCandidate],
     st: &mut Stats,
-) -> Result<HashMap<usize, PhaseAssignment>, String> {
+) -> Result<Vec<ReadPhaseCall>, String> {
     let Some(bam_path) = cfg.phase_bam_path.as_deref() else {
-        return Ok(HashMap::new());
+        return Ok(Vec::new());
     };
-    if candidates.is_empty() {
-        return Ok(HashMap::new());
-    }
 
     let mut bam = bam::IndexedReader::from_path(bam_path)
         .map_err(|e| format!("cannot open indexed BAM/CRAM '{bam_path}': {e}"))?;
@@ -833,7 +1078,7 @@ fn phase_candidates_from_bam(
             .push(idx);
     }
 
-    let mut pair_scores: HashMap<(usize, usize), i64> = HashMap::new();
+    let mut read_calls = Vec::new();
     let mut record = bam::Record::new();
 
     for (chrom, indices) in by_chrom {
@@ -874,48 +1119,21 @@ fn phase_candidates_from_bam(
                 continue;
             }
             st.bam_phase_informative_reads += 1;
-            for i in 0..calls.len() {
-                for j in i + 1..calls.len() {
-                    let (a, sa) = calls[i];
-                    let (b, sb) = calls[j];
-                    let key = if a < b { (a, b) } else { (b, a) };
-                    let parity = (sa ^ sb) & 1;
-                    let score = pair_scores.entry(key).or_insert(0);
-                    if parity == 0 {
-                        *score += 1;
-                    } else {
-                        *score -= 1;
-                    }
-                }
-            }
+            read_calls.push(ReadPhaseCall {
+                calls,
+                order: read_calls.len(),
+            });
         }
     }
 
-    let mut constraints: Vec<(i64, usize, usize, u8)> = pair_scores
-        .into_iter()
-        .filter_map(|((a, b), score)| {
-            if score > 0 {
-                Some((score, a, b, 0))
-            } else if score < 0 {
-                Some((-score, a, b, 1))
-            } else {
-                None
-            }
-        })
-        .collect();
-    constraints.sort_by(|x, y| {
-        y.0.cmp(&x.0)
-            .then_with(|| x.1.cmp(&y.1))
-            .then_with(|| x.2.cmp(&y.2))
-    });
+    Ok(read_calls)
+}
 
-    let mut dsu = Dsu::new(candidates.len());
-    for (_weight, a, b, parity) in constraints {
-        if !dsu.union(a, b, parity) {
-            st.bam_phase_conflicts += 1;
-        }
-    }
-
+fn assignments_from_dsu(
+    candidates: &[PhaseCandidate],
+    mut dsu: Dsu,
+    st: &mut Stats,
+) -> HashMap<usize, PhaseAssignment> {
     let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
     for idx in 0..candidates.len() {
         let (root, _) = dsu.find(idx);
@@ -945,7 +1163,345 @@ fn phase_candidates_from_bam(
             );
         }
     }
+    assignments
+}
 
+fn phase_candidates_greedy(
+    candidates: &[PhaseCandidate],
+    read_calls: &[ReadPhaseCall],
+    st: &mut Stats,
+) -> HashMap<usize, PhaseAssignment> {
+    let mut pair_scores: HashMap<(usize, usize), i64> = HashMap::new();
+    for read in read_calls {
+        for i in 0..read.calls.len() {
+            for j in i + 1..read.calls.len() {
+                let (a, sa, qa) = read.calls[i];
+                let (b, sb, qb) = read.calls[j];
+                let key = if a < b { (a, b) } else { (b, a) };
+                let parity = (sa ^ sb) & 1;
+                let weight = i64::from(qa.min(qb));
+                let score = pair_scores.entry(key).or_insert(0);
+                if parity == 0 {
+                    *score += weight;
+                } else {
+                    *score -= weight;
+                }
+            }
+        }
+    }
+
+    let mut constraints: Vec<(i64, usize, usize, u8)> = pair_scores
+        .into_iter()
+        .filter_map(|((a, b), score)| {
+            if score > 0 {
+                Some((score, a, b, 0))
+            } else if score < 0 {
+                Some((-score, a, b, 1))
+            } else {
+                None
+            }
+        })
+        .collect();
+    constraints.sort_by(|x, y| {
+        y.0.cmp(&x.0)
+            .then_with(|| x.1.cmp(&y.1))
+            .then_with(|| x.2.cmp(&y.2))
+    });
+
+    let mut dsu = Dsu::new(candidates.len());
+    for (_weight, a, b, parity) in constraints {
+        if !dsu.union(a, b, parity) {
+            st.bam_phase_conflicts += 1;
+        }
+    }
+    assignments_from_dsu(candidates, dsu, st)
+}
+
+fn select_read_calls_max_coverage(
+    read_calls: &[ReadPhaseCall],
+    variant_count: usize,
+    max_coverage: usize,
+) -> Vec<ReadPhaseCall> {
+    let mut order: Vec<usize> = (0..read_calls.len()).collect();
+    order.sort_by(|&a, &b| {
+        let qa: u64 = read_calls[a]
+            .calls
+            .iter()
+            .map(|&(_, _, q)| u64::from(q))
+            .sum();
+        let qb: u64 = read_calls[b]
+            .calls
+            .iter()
+            .map(|&(_, _, q)| u64::from(q))
+            .sum();
+        read_calls[b]
+            .calls
+            .len()
+            .cmp(&read_calls[a].calls.len())
+            .then_with(|| qb.cmp(&qa))
+            .then_with(|| read_calls[a].order.cmp(&read_calls[b].order))
+    });
+
+    let mut coverage = vec![0usize; variant_count];
+    let mut selected = Vec::new();
+    for idx in order {
+        if read_calls[idx]
+            .calls
+            .iter()
+            .all(|&(var, _, _)| coverage[var] < max_coverage)
+        {
+            for &(var, _, _) in &read_calls[idx].calls {
+                coverage[var] += 1;
+            }
+            selected.push(read_calls[idx].clone());
+        }
+    }
+    selected.sort_by_key(|r| r.order);
+    selected
+}
+
+fn project_mask(from_active: &[usize], to_pos: &HashMap<usize, usize>, from_mask: u64) -> u64 {
+    let mut key = 0u64;
+    for (from_bit, read_id) in from_active.iter().enumerate() {
+        if let Some(&to_bit) = to_pos.get(read_id) {
+            if (from_mask & (1u64 << from_bit)) != 0 {
+                key |= 1u64 << to_bit;
+            }
+        }
+    }
+    key
+}
+
+fn mec_column_cost(
+    mask: u64,
+    observations: &[(usize, u8, u8)],
+    active_pos: &HashMap<usize, usize>,
+) -> (u64, u8) {
+    let mut best_cost = u64::MAX;
+    let mut best_orientation = 0u8;
+    for orientation in 0..=1u8 {
+        let mut cost = 0u64;
+        for &(read_id, allele, qual) in observations {
+            let bit = ((mask >> active_pos[&read_id]) & 1) as u8;
+            let expected = orientation ^ bit;
+            if allele != expected {
+                cost += u64::from(qual);
+            }
+        }
+        if cost < best_cost {
+            best_cost = cost;
+            best_orientation = orientation;
+        }
+    }
+    (best_cost, best_orientation)
+}
+
+fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<usize, u8> {
+    let mut sorted_members = members.to_vec();
+    sorted_members.sort_unstable();
+    let mut global_to_local = HashMap::new();
+    for (local, &global) in sorted_members.iter().enumerate() {
+        global_to_local.insert(global, local);
+    }
+
+    let mut local_reads = Vec::new();
+    for read in reads {
+        let mut calls = read
+            .calls
+            .iter()
+            .filter_map(|&(global, allele, qual)| {
+                global_to_local
+                    .get(&global)
+                    .map(|&var| LocalReadCall { var, allele, qual })
+            })
+            .collect::<Vec<_>>();
+        if calls.is_empty() {
+            continue;
+        }
+        calls.sort_by_key(|c| c.var);
+        local_reads.push(LocalRead { calls });
+    }
+
+    let mut by_var: Vec<Vec<(usize, u8, u8)>> = vec![Vec::new(); sorted_members.len()];
+    for (read_id, read) in local_reads.iter().enumerate() {
+        for call in &read.calls {
+            by_var[call.var].push((read_id, call.allele, call.qual));
+        }
+    }
+
+    let mut traces: Vec<MecTraceColumn> = Vec::new();
+    for observations in &by_var {
+        let mut active_reads = observations
+            .iter()
+            .map(|&(read_id, _, _)| read_id)
+            .collect::<Vec<_>>();
+        active_reads.sort_unstable();
+        active_reads.dedup();
+        let active_pos = active_reads
+            .iter()
+            .enumerate()
+            .map(|(i, &read_id)| (read_id, i))
+            .collect::<HashMap<_, _>>();
+        let state_count = 1u64 << active_reads.len();
+        let mut states = HashMap::new();
+
+        if let Some(prev) = traces.last() {
+            let mut prev_lookup: HashMap<u64, (u64, u64)> = HashMap::new();
+            for (&prev_mask, prev_state) in &prev.states {
+                let key = project_mask(&prev.active_reads, &active_pos, prev_mask);
+                match prev_lookup.get_mut(&key) {
+                    Some((best_cost, best_mask)) if prev_state.cost < *best_cost => {
+                        *best_cost = prev_state.cost;
+                        *best_mask = prev_mask;
+                    }
+                    None => {
+                        prev_lookup.insert(key, (prev_state.cost, prev_mask));
+                    }
+                    _ => {}
+                }
+            }
+            let shared_mask = active_reads
+                .iter()
+                .enumerate()
+                .fold(0u64, |acc, (bit, read_id)| {
+                    if prev.active_reads.contains(read_id) {
+                        acc | (1u64 << bit)
+                    } else {
+                        acc
+                    }
+                });
+            for mask in 0..state_count {
+                let key = mask & shared_mask;
+                let Some(&(prev_cost, prev_mask)) = prev_lookup.get(&key) else {
+                    continue;
+                };
+                let (column_cost, orientation) = mec_column_cost(mask, observations, &active_pos);
+                states.insert(
+                    mask,
+                    MecTraceState {
+                        cost: prev_cost + column_cost,
+                        prev_mask: Some(prev_mask),
+                        orientation,
+                    },
+                );
+            }
+        } else {
+            for mask in 0..state_count {
+                let (column_cost, orientation) = mec_column_cost(mask, observations, &active_pos);
+                states.insert(
+                    mask,
+                    MecTraceState {
+                        cost: column_cost,
+                        prev_mask: None,
+                        orientation,
+                    },
+                );
+            }
+        }
+        traces.push(MecTraceColumn {
+            active_reads,
+            states,
+        });
+    }
+
+    let mut rel_by_local = vec![0u8; sorted_members.len()];
+    let Some(last) = traces.last() else {
+        return HashMap::new();
+    };
+    let Some((&mut_mask, _)) = last
+        .states
+        .iter()
+        .min_by(|(ma, sa), (mb, sb)| sa.cost.cmp(&sb.cost).then_with(|| ma.cmp(mb)))
+    else {
+        return HashMap::new();
+    };
+    let mut mask = mut_mask;
+    for col in (0..traces.len()).rev() {
+        let state = traces[col].states[&mask];
+        rel_by_local[col] = state.orientation;
+        if let Some(prev_mask) = state.prev_mask {
+            mask = prev_mask;
+        }
+    }
+
+    sorted_members
+        .into_iter()
+        .enumerate()
+        .map(|(local, global)| (global, rel_by_local[local]))
+        .collect()
+}
+
+fn phase_candidates_mec(
+    cfg: &Config,
+    candidates: &[PhaseCandidate],
+    read_calls: &[ReadPhaseCall],
+    st: &mut Stats,
+) -> HashMap<usize, PhaseAssignment> {
+    let selected =
+        select_read_calls_max_coverage(read_calls, candidates.len(), cfg.phase_max_coverage);
+    st.bam_phase_selected_reads = selected.len() as u64;
+
+    let mut dsu = Dsu::new(candidates.len());
+    for read in &selected {
+        let first = read.calls[0].0;
+        for &(idx, _, _) in read.calls.iter().skip(1) {
+            let _ = dsu.union(first, idx, 0);
+        }
+    }
+
+    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+    for read in &selected {
+        for &(idx, _, _) in &read.calls {
+            let (root, _) = dsu.find(idx);
+            components.entry(root).or_default().push(idx);
+        }
+    }
+    for members in components.values_mut() {
+        members.sort_unstable();
+        members.dedup();
+    }
+
+    let mut assignments = HashMap::new();
+    for members in components.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        st.bam_phase_components += 1;
+        let rels = solve_mec_component(members, &selected);
+        let anchor = *members
+            .iter()
+            .min_by_key(|&&idx| (candidates[idx].pos, idx))
+            .expect("non-empty component");
+        let ps = candidates[anchor].pos;
+        let anchor_rel = rels.get(&anchor).copied().unwrap_or(0);
+        for &idx in members {
+            if let Some(rel) = rels.get(&idx).copied() {
+                assignments.insert(
+                    idx,
+                    PhaseAssignment {
+                        ps,
+                        rel: (rel ^ anchor_rel) & 1,
+                    },
+                );
+            }
+        }
+    }
+    assignments
+}
+
+fn phase_candidates_from_bam(
+    cfg: &Config,
+    candidates: &[PhaseCandidate],
+    st: &mut Stats,
+) -> Result<HashMap<usize, PhaseAssignment>, String> {
+    if cfg.phase_bam_path.is_none() || candidates.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let read_calls = collect_bam_phase_read_calls(cfg, candidates, st)?;
+    let assignments = match cfg.phase_algorithm {
+        PhaseAlgorithm::Mec => phase_candidates_mec(cfg, candidates, &read_calls, st),
+        PhaseAlgorithm::Greedy => phase_candidates_greedy(candidates, &read_calls, st),
+    };
     st.bam_phase_phased_variants = assignments.len() as u64;
     st.bam_phase_unphased_variants = candidates.len().saturating_sub(assignments.len()) as u64;
     st.skipped_unphased += st.bam_phase_unphased_variants;
@@ -1073,6 +1629,7 @@ fn add_observation_for_candidate(
     hap: usize,
     allele: i32,
     ps: i64,
+    codon_map: Option<&CodonMap>,
     obs: &mut Vec<Obs>,
     st: &mut Stats,
 ) -> Result<(), String> {
@@ -1143,6 +1700,14 @@ fn add_observation_for_candidate(
         }
     }
 
+    let is_snv = candidate.is_snv && is_snv_pair(ref_allele, alt_allele);
+    let codon_keys = if is_snv {
+        codon_map
+            .map(|m| m.keys_for(&candidate.chrom, candidate.pos))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     obs.push(Obs {
         rid: candidate.rid,
         hap: hap as i32,
@@ -1151,7 +1716,8 @@ fn add_observation_for_candidate(
         end: candidate.end,
         ref_allele: ref_allele.clone(),
         alt_allele: alt_allele.clone(),
-        is_snv: candidate.is_snv && is_snv_pair(ref_allele, alt_allele),
+        is_snv,
+        codon_keys,
     });
     st.observations += 1;
     Ok(())
@@ -1186,6 +1752,7 @@ fn read_observations_with_bam_phasing(
         })?,
     };
     let header_info = collect_header_info(&reader, sample_idx)?;
+    let codon_map = load_optional_codon_map(cfg)?;
 
     let mut candidates = Vec::new();
     let mut st = Stats::default();
@@ -1327,6 +1894,7 @@ fn read_observations_with_bam_phasing(
             0,
             hap_alleles[0],
             assignment.ps,
+            codon_map.as_ref(),
             &mut obs,
             &mut st,
         )?;
@@ -1336,6 +1904,7 @@ fn read_observations_with_bam_phasing(
             1,
             hap_alleles[1],
             assignment.ps,
+            codon_map.as_ref(),
             &mut obs,
             &mut st,
         )?;
@@ -1374,6 +1943,7 @@ fn read_observations(cfg: &Config) -> Result<(HeaderInfo, Vec<Obs>, Stats), Stri
         })?,
     };
     let header_info = collect_header_info(&reader, sample_idx)?;
+    let codon_map = load_optional_codon_map(cfg)?;
 
     let mut obs = Vec::new();
     let mut st = Stats::default();
@@ -1498,6 +2068,14 @@ fn read_observations(cfg: &Config) -> Result<(HeaderInfo, Vec<Obs>, Stats), Stri
                 }
             }
             let is_snv = is_snv_pair(&ref_allele, &alt_allele);
+            let codon_keys = if is_snv {
+                codon_map
+                    .as_ref()
+                    .map(|m| m.keys_for(chrom, pos1))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             obs.push(Obs {
                 rid: record.rid().unwrap_or(0) as i32,
                 hap: hap as i32,
@@ -1507,6 +2085,7 @@ fn read_observations(cfg: &Config) -> Result<(HeaderInfo, Vec<Obs>, Stats), Stri
                 ref_allele: ref_allele.clone(),
                 alt_allele,
                 is_snv,
+                codon_keys,
             });
             st.observations += 1;
         }
@@ -1742,7 +2321,7 @@ fn add_call_from_block(
     Ok(())
 }
 
-fn build_calls(
+fn build_calls_proximity(
     cfg: &Config,
     header: &HeaderInfo,
     fai: *mut htslib::faidx_t,
@@ -1765,6 +2344,63 @@ fn build_calls(
         i = j + 1;
     }
     Ok(calls)
+}
+
+fn build_calls_nirvana_codon(
+    cfg: &Config,
+    header: &HeaderInfo,
+    fai: *mut htslib::faidx_t,
+    obs: &mut [Obs],
+) -> Result<Vec<MnvCall>, String> {
+    let mut calls = Vec::new();
+    if obs.is_empty() {
+        return Ok(calls);
+    }
+    obs.sort_by(cmp_obs);
+
+    let mut grouped: HashMap<(i32, i32, i64, String), Vec<Obs>> = HashMap::new();
+    for o in obs.iter() {
+        if !o.is_snv || o.codon_keys.is_empty() {
+            continue;
+        }
+        for key in &o.codon_keys {
+            grouped
+                .entry((o.rid, o.hap, o.ps, key.clone()))
+                .or_default()
+                .push(o.clone());
+        }
+    }
+
+    let mut blocks = grouped.into_values().collect::<Vec<_>>();
+    blocks.sort_by(|a, b| {
+        let aa = &a[0];
+        let bb = &b[0];
+        aa.rid
+            .cmp(&bb.rid)
+            .then_with(|| aa.hap.cmp(&bb.hap))
+            .then_with(|| aa.ps.cmp(&bb.ps))
+            .then_with(|| aa.pos.cmp(&bb.pos))
+    });
+    for mut block in blocks {
+        block.sort_by(cmp_obs);
+        block.dedup_by_key(|o| (o.rid, o.hap, o.ps, o.pos, o.end, o.alt_allele.clone()));
+        if block.len() >= cfg.min_variants {
+            add_call_from_block(cfg, header, fai, &block, &mut calls)?;
+        }
+    }
+    Ok(calls)
+}
+
+fn build_calls(
+    cfg: &Config,
+    header: &HeaderInfo,
+    fai: *mut htslib::faidx_t,
+    obs: &mut [Obs],
+) -> Result<Vec<MnvCall>, String> {
+    match cfg.mnv_algorithm {
+        MnvAlgorithm::Proximity => build_calls_proximity(cfg, header, fai, obs),
+        MnvAlgorithm::NirvanaCodon => build_calls_nirvana_codon(cfg, header, fai, obs),
+    }
 }
 
 fn merge_duplicate_calls(calls: &mut Vec<MnvCall>) {
@@ -1819,9 +2455,13 @@ fn push_output_header_records(h: &mut bcf::Header, cfg: &Config, header: &Header
     h.push_record(b"##phase_mnv_normalization=Tan2015_left_aligned_parsimonious");
     h.push_record(b"##phase_mnv_normalization_citation=Tan_A_Abecasis_GR_Kang_HM_Bioinformatics_2015_31_13_2202_2204_doi_10.1093/bioinformatics/btv112");
     h.push_record(format!("##phase_mnv_input={}", cfg.input_path).as_bytes());
+    h.push_record(format!("##phase_mnv_mnv_algorithm={}", cfg.mnv_algorithm.as_str()).as_bytes());
+    if let Some(path) = cfg.codon_map_path.as_deref() {
+        h.push_record(format!("##phase_mnv_codon_map={path}").as_bytes());
+    }
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         h.push_record(format!("##phase_mnv_phase_from_bam={bam_path}").as_bytes());
-        h.push_record(b"##phase_mnv_phase_model=experimental_read_linkage_greedy_parity");
+        h.push_record(format!("##phase_mnv_phase_model={}", phase_model_name(cfg)).as_bytes());
     }
     h.push_record(format!("##reference={}", cfg.fasta_path).as_bytes());
     h.push_record(b"##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Merged call type: MNV for pure SNV blocks, COMPLEX when indels are included\">");
@@ -1854,12 +2494,17 @@ fn write_header<W: Write>(out: &mut W, cfg: &Config, header: &HeaderInfo) -> io:
     )?;
     writeln!(out, "##phase_mnv_normalization_citation=Tan_A_Abecasis_GR_Kang_HM_Bioinformatics_2015_31_13_2202_2204_doi_10.1093/bioinformatics/btv112")?;
     writeln!(out, "##phase_mnv_input={}", cfg.input_path)?;
+    writeln!(
+        out,
+        "##phase_mnv_mnv_algorithm={}",
+        cfg.mnv_algorithm.as_str()
+    )?;
+    if let Some(path) = cfg.codon_map_path.as_deref() {
+        writeln!(out, "##phase_mnv_codon_map={path}")?;
+    }
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         writeln!(out, "##phase_mnv_phase_from_bam={bam_path}")?;
-        writeln!(
-            out,
-            "##phase_mnv_phase_model=experimental_read_linkage_greedy_parity"
-        )?;
+        writeln!(out, "##phase_mnv_phase_model={}", phase_model_name(cfg))?;
     }
     writeln!(out, "##reference={}", cfg.fasta_path)?;
     writeln!(out, "##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Merged call type: MNV for pure SNV blocks, COMPLEX when indels are included\">")?;
@@ -2022,7 +2667,7 @@ fn push_all_sites_header_records(h: &mut bcf::Header, cfg: &Config, input_header
     h.push_record(format!("##phase_mnv_reference={}", cfg.fasta_path).as_bytes());
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         h.push_record(format!("##phase_mnv_phase_from_bam={bam_path}").as_bytes());
-        h.push_record(b"##phase_mnv_phase_model=experimental_read_linkage_greedy_parity");
+        h.push_record(format!("##phase_mnv_phase_model={}", phase_model_name(cfg)).as_bytes());
     }
     if input_header.format_type(b"PS").is_err() {
         h.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set assigned by phase_mnv_rs\">");
@@ -2224,7 +2869,7 @@ fn print_summary(cfg: &Config, st: &Stats, sample: &str) {
         sample
     );
     eprintln!(
-        "phase_mnv: settings max_gap={} min_vars={} unsupported_alleles={} warn_on_n={} no_ref_check={} no_header={} output_format={} threads={} emit={}",
+        "phase_mnv: settings max_gap={} min_vars={} unsupported_alleles={} warn_on_n={} no_ref_check={} no_header={} output_format={} threads={} emit={} mnv_algorithm={}",
         cfg.max_gap,
         cfg.min_variants,
         cfg.unsupported_alleles.as_str(),
@@ -2233,16 +2878,20 @@ fn print_summary(cfg: &Config, st: &Stats, sample: &str) {
         cfg.no_header,
         infer_output_kind(cfg).as_str(),
         cfg.threads,
-        cfg.emit_mode.as_str()
+        cfg.emit_mode.as_str(),
+        cfg.mnv_algorithm.as_str()
     );
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         eprintln!(
-            "phase_mnv: bam_phase input={} min_mapq={} min_baseq={} candidates={} informative_reads={} components={} phased_variants={} unphased_variants={} conflicts={}",
+            "phase_mnv: bam_phase input={} algorithm={} max_coverage={} min_mapq={} min_baseq={} candidates={} informative_reads={} selected_reads={} components={} phased_variants={} unphased_variants={} conflicts={}",
             bam_path,
+            cfg.phase_algorithm.as_str(),
+            cfg.phase_max_coverage,
             cfg.phase_min_mapq,
             cfg.phase_min_baseq,
             st.bam_phase_candidates,
             st.bam_phase_informative_reads,
+            st.bam_phase_selected_reads,
             st.bam_phase_components,
             st.bam_phase_phased_variants,
             st.bam_phase_unphased_variants,

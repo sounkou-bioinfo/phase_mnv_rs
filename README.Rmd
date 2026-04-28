@@ -188,8 +188,20 @@ The default Rust and C behavior remains MNV-only:
 --emit mnv
 ```
 
-It writes only derived `TYPE=MNV` / `TYPE=COMPLEX` records. The Rust binary also
-has an initial whole-input mode:
+It writes only derived `TYPE=MNV` / `TYPE=COMPLEX` records. The default MNV
+construction algorithm is proximity-based. The Rust binary also has a first
+Nirvana-inspired SNV-only codon recomposition slice:
+
+```text
+--mnv-algorithm nirvana-codon --codon-map codons.tsv
+```
+
+The codon map is BED-like (`CHROM START0 END0 TRANSCRIPT CODON_ID`). In this
+mode, phased SNV observations are recomposed only when two or more observations
+on the same haplotype/phase set share a transcript/codon key. This captures
+Nirvana's same-codon seed rule without yet claiming full Nirvana parity.
+
+The Rust binary also has an initial whole-input mode:
 
 ```text
 --emit all-sites
@@ -307,11 +319,13 @@ target/release/phase_mnv_rs \
 ```
 
 This Rust-only mode ignores input `GT` phase and `FORMAT/PS`, extracts allele
-co-occurrence from reads with `rust-htslib`, builds connected phase components,
-assigns deterministic `PS` values from the first variant in each component, and
-then runs the normal MNV/COMPLEX construction. It is intentionally described as
+observations from reads with `rust-htslib`, performs deterministic read selection
+(default `--phase-max-coverage 15`), builds connected phase components, and by
+default solves the exact weighted diploid single-sample MEC objective per
+component (`--phase-algorithm mec`). The earlier pairwise parity heuristic is
+still available as `--phase-algorithm greedy`. It is intentionally described as
 experimental: it is WhatsHap-inspired, but not yet a full clone of WhatsHap's
-PedMEC/MEC optimization.
+PedMEC implementation or all WhatsHap options.
 
 ### BAM-backed phasing with external WhatsHap before MNV construction
 

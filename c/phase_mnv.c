@@ -878,6 +878,7 @@ static void write_header(FILE *out, const Config *cfg, const bcf_hdr_t *hdr, int
     fprintf(out, "##phase_mnv_normalization=Tan2015_left_aligned_parsimonious\n");
     fprintf(out, "##phase_mnv_normalization_citation=Tan_A_Abecasis_GR_Kang_HM_Bioinformatics_2015_31_13_2202_2204_doi_10.1093/bioinformatics/btv112\n");
     fprintf(out, "##phase_mnv_input=%s\n", cfg->input_path);
+    fprintf(out, "##phase_mnv_mnv_algorithm=proximity\n");
     fprintf(out, "##reference=%s\n", cfg->fasta_path);
     fprintf(out, "##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Merged call type: MNV for pure SNV blocks, COMPLEX when indels are included\">\n");
     fprintf(out, "##INFO=<ID=NVAR,Number=1,Type=Integer,Description=\"Number of phased source variants merged into this call\">\n");
@@ -937,7 +938,7 @@ static void print_summary(const Config *cfg, const Stats *st, const char *sample
             "phase_mnv: input=%s reference=%s output=%s sample=%s\n",
             cfg->input_path, cfg->fasta_path, output_label(cfg), sample);
     fprintf(stderr,
-            "phase_mnv: settings max_gap=%" PRId64 " min_vars=%d unsupported_alleles=%s warn_on_n=%s no_ref_check=%s no_header=%s output_format=vcf threads=1 emit=mnv\n",
+            "phase_mnv: settings max_gap=%" PRId64 " min_vars=%d unsupported_alleles=%s warn_on_n=%s no_ref_check=%s no_header=%s output_format=vcf threads=1 emit=mnv mnv_algorithm=proximity\n",
             cfg->max_gap, cfg->min_variants, unsupported_policy_name(cfg->unsupported_alleles),
             cfg->warn_on_n ? "true" : "false",
             cfg->no_ref_check ? "true" : "false",

@@ -44,13 +44,16 @@ Behavior fixtures cover:
 - `scripts/unphase_vcf.py` conversion of phased GT separators to unphased GT
   while dropping phase-specific FORMAT tags by default
 - experimental Rust `--phase-from-bam` read-backed phasing on a tiny tracked
-  BAM/BAI fixture before MNV construction
+  BAM/BAI fixture before MNV construction, using the default exact
+  single-sample MEC dynamic-programming algorithm
 - Rust output format inference for plain VCF, BGZF-compressed VCF, and BCF,
   including `--threads` plumbing for compressed input/output checks when
   `bcftools` is available
 - Rust `--emit all-sites` header preservation: the original VCF header is kept
   and `phase_mnv` metadata is appended while BAM-backed `GT:PS` updates are
   applied to all input records in the tiny tracked fixture
+- Rust `--mnv-algorithm nirvana-codon` same-codon SNV recomposition on a tracked
+  BED-like codon-map fixture
 - Rust/C byte identity for supported synthetic cases
 
 ## Negative/failure-mode fixtures
@@ -141,9 +144,13 @@ is not vendored:
 ./scripts/clone_reference_impls.sh
 ```
 
-The intended benchmark scope is narrower than current `phase_mnv_rs` merging:
-SNV-only recomposition where two or more SNVs affect the same codon in at least
-one transcript, with Nirvana-like phase-set and homozygous-variant semantics.
+The first implemented benchmark slice is `--mnv-algorithm nirvana-codon` (see
+`docs/nirvana_benchmark.md`), which uses a small BED-like codon map and emits
+SNV-only MNVs where two or more phased SNV observations share a transcript/codon
+key. The broader intended benchmark
+scope remains Nirvana-like phase-set and homozygous-variant semantics,
+adjacent-codon aggregation, unsupported-overlap barriers, sample-specific
+multi-sample recomposition, and exact linkage/quality/filter behavior.
 Indel/complex recomposition remains a separate policy decision.
 
 ## Normalization references

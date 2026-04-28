@@ -86,8 +86,20 @@ The default Rust and C behavior remains MNV-only:
 --emit mnv
 ```
 
-It writes only derived `TYPE=MNV` / `TYPE=COMPLEX` records. The Rust binary also
-has an initial whole-input mode:
+It writes only derived `TYPE=MNV` / `TYPE=COMPLEX` records. The default MNV
+construction algorithm is proximity-based. The Rust binary also has a first
+Nirvana-inspired SNV-only codon recomposition slice:
+
+```text
+--mnv-algorithm nirvana-codon --codon-map codons.tsv
+```
+
+The codon map is BED-like (`CHROM START0 END0 TRANSCRIPT CODON_ID`). In this
+mode, phased SNV observations are recomposed only when two or more observations
+on the same haplotype/phase set share a transcript/codon key. This captures
+Nirvana's same-codon seed rule without yet claiming full Nirvana parity.
+
+The Rust binary also has an initial whole-input mode:
 
 ```text
 --emit all-sites
@@ -144,6 +156,11 @@ options:
                         updates GT/PS when used with --phase-from-bam
   -g, --max-gap N        Allow up to N unchanged reference bases between
                         phased variants when building one merged call (default: 0)
+      --mnv-algorithm MODE
+                        MNV construction: proximity (default) or
+                        nirvana-codon (SNV-only same-codon seed mode)
+      --codon-map FILE   BED-like codon map for --mnv-algorithm nirvana-codon:
+                        CHROM START0 END0 TRANSCRIPT CODON_ID [ignored...]
       --min-vars N       Minimum source variants per emitted call (default: 2)
       --min-snvs N       Alias for --min-vars
       --unsupported-alleles MODE
@@ -152,6 +169,11 @@ options:
       --phase-from-bam FILE
                         Experimental Rust read-backed phasing from indexed BAM/CRAM
                         before MNV construction; input GT phase/PS is ignored
+      --phase-algorithm MODE
+                        BAM phasing algorithm: mec or greedy (default: mec)
+      --phase-max-coverage N
+                        Maximum selected read coverage per variant for MEC phasing
+                        (default: 15; WhatsHap-style downsampling guard)
       --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20)
       --phase-min-baseq N Minimum base quality for --phase-from-bam (default: 13)
       --warn-on-n        Warn when a selected REF/ALT allele contains N
@@ -174,11 +196,13 @@ Notes:
     same phase set. If PS is absent, the phase separator and proximity
     define the merge block.
   * --phase-from-bam is a Rust-only experimental phaser inspired by
-    WhatsHap's read-backed phasing model. It currently phases variants by
-    read-supported allele co-occurrence in connected components.
-  * With the default --max-gap 0, only adjacent phased variants are
-    merged. Pure SNV blocks are TYPE=MNV; blocks containing indels are
-    TYPE=COMPLEX.
+    WhatsHap's read-backed phasing model. The default mec algorithm solves
+    exact diploid single-sample MEC per connected component after deterministic
+    read selection; greedy keeps the earlier pairwise parity heuristic.
+  * With the default --max-gap 0 and --mnv-algorithm proximity, only
+    adjacent phased variants are merged. Pure SNV blocks are TYPE=MNV;
+    blocks containing indels are TYPE=COMPLEX. nirvana-codon mode only
+    recomposes phased SNVs sharing a codon key from --codon-map.
   * Output format is inferred from -o/--output. BCF output always includes
     a VCF/BCF header even if --no-header is set.
   * --emit all-sites keeps the original VCF/BCF header via htslib and
@@ -299,11 +323,13 @@ target/release/phase_mnv_rs \
 ```
 
 This Rust-only mode ignores input `GT` phase and `FORMAT/PS`, extracts allele
-co-occurrence from reads with `rust-htslib`, builds connected phase components,
-assigns deterministic `PS` values from the first variant in each component, and
-then runs the normal MNV/COMPLEX construction. It is intentionally described as
+observations from reads with `rust-htslib`, performs deterministic read selection
+(default `--phase-max-coverage 15`), builds connected phase components, and by
+default solves the exact weighted diploid single-sample MEC objective per
+component (`--phase-algorithm mec`). The earlier pairwise parity heuristic is
+still available as `--phase-algorithm greedy`. It is intentionally described as
 experimental: it is WhatsHap-inspired, but not yet a full clone of WhatsHap's
-PedMEC/MEC optimization.
+PedMEC implementation or all WhatsHap options.
 
 ### BAM-backed phasing with external WhatsHap before MNV construction
 
