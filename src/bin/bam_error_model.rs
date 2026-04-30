@@ -4,8 +4,9 @@ use rust_htslib::bam::{self, Read};
 use rust_htslib::htslib;
 use std::collections::BTreeMap;
 use std::ffi::CString;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 fn usage() -> &'static str {
     "usage: bam_error_model --reference ref.fa [options] reads.bam|reads.cram\n\n\
@@ -20,6 +21,7 @@ options:\n\
       --max-reads N         Stop after N usable reads\n\
       --min-mapq N          Optional MAPQ cutoff (default: 0; no cutoff)\n\
       --position-tsv FILE   Write per-read-position empirical error TSV\n\
+      --event-tsv FILE      Write exact-Q event/ref/read-base composition TSV\n\
       --high-quality-threshold N  BaseQ threshold for high/low position groups (default: 20)\n\
       --skip-high-nonref-fraction F  Skip likely variant sites above high-Q non-ref fraction F (off)\n\
       --include-duplicates  Include duplicate reads\n\
@@ -36,6 +38,7 @@ struct Config {
     max_reads: Option<u64>,
     min_mapq: u8,
     position_tsv: Option<String>,
+    event_tsv: Option<String>,
     high_quality_threshold: u8,
     skip_high_nonref_fraction: Option<f64>,
     include_duplicates: bool,
@@ -91,6 +94,15 @@ struct Model {
     by_baseq: BTreeMap<String, Stats>,
     by_mapq: BTreeMap<String, Stats>,
     by_read_pos: BTreeMap<usize, PositionStats>,
+    by_event: BTreeMap<EventKey, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct EventKey {
+    baseq: String,
+    event: String,
+    ref_base: char,
+    read_base: char,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +159,63 @@ fn parse_f64(s: &str, name: &str) -> f64 {
         .unwrap_or_else(|_| die(&format!("{name} must be a number")))
 }
 
+fn normalized_output_path(path: &str) -> Result<PathBuf, String> {
+    normalized_output_path_inner(Path::new(path), path, 0)
+}
+
+fn normalized_output_path_inner(
+    path: &Path,
+    original: &str,
+    depth: usize,
+) -> Result<PathBuf, String> {
+    if depth > 16 {
+        return Err(format!(
+            "too many symlink levels while resolving '{original}'"
+        ));
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("failed to get current directory: {e}"))?
+            .join(path)
+    };
+
+    if let Ok(meta) = fs::symlink_metadata(&absolute) {
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&absolute)
+                .map_err(|e| format!("failed to read symlink '{}': {e}", absolute.display()))?;
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                absolute
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(target)
+            };
+            return normalized_output_path_inner(&resolved, original, depth + 1);
+        }
+    }
+
+    if absolute.exists() {
+        return fs::canonicalize(&absolute)
+            .map_err(|e| format!("failed to resolve '{}': {e}", absolute.display()));
+    }
+    let parent = absolute
+        .parent()
+        .ok_or_else(|| format!("invalid output path '{original}'"))?;
+    let file_name = absolute
+        .file_name()
+        .ok_or_else(|| format!("invalid output path '{original}'"))?;
+    let parent = fs::canonicalize(parent).map_err(|e| {
+        format!(
+            "failed to resolve output directory for '{}': {e}",
+            absolute.display()
+        )
+    })?;
+    Ok(parent.join(file_name))
+}
+
 fn parse_region(s: &str) -> Region {
     let (chrom, rest) = s
         .split_once(':')
@@ -180,6 +249,7 @@ fn parse_args() -> Config {
     let mut max_reads = None;
     let mut min_mapq = 0u8;
     let mut position_tsv = None;
+    let mut event_tsv = None;
     let mut high_quality_threshold = 20u8;
     let mut skip_high_nonref_fraction = None;
     let mut include_duplicates = false;
@@ -233,6 +303,13 @@ fn parse_args() -> Config {
                 }
                 position_tsv = Some(args[i].clone());
             }
+            "--event-tsv" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--event-tsv requires an argument");
+                }
+                event_tsv = Some(args[i].clone());
+            }
             "--high-quality-threshold" => {
                 i += 1;
                 if i >= args.len() {
@@ -275,6 +352,7 @@ fn parse_args() -> Config {
         max_reads,
         min_mapq,
         position_tsv,
+        event_tsv,
         high_quality_threshold,
         skip_high_nonref_fraction,
         include_duplicates,
@@ -377,6 +455,17 @@ enum EventKind {
     Deletion,
 }
 
+impl EventKind {
+    fn label(self) -> &'static str {
+        match self {
+            EventKind::Match => "match",
+            EventKind::Mismatch => "substitution",
+            EventKind::Insertion => "insertion",
+            EventKind::Deletion => "deletion",
+        }
+    }
+}
+
 fn add_to_stats(stats: &mut Stats, event: EventKind) {
     match event {
         EventKind::Match => stats.add_match(),
@@ -414,6 +503,17 @@ fn add_position_event(
     add_to_stats(grouped, event);
 }
 
+fn exact_q_label(baseq: Option<u8>) -> String {
+    match baseq {
+        Some(255) | None => "unknown".to_string(),
+        Some(q) => q.to_string(),
+    }
+}
+
+fn base_char(base: u8) -> char {
+    base.to_ascii_uppercase() as char
+}
+
 fn add_event(
     model: &mut Model,
     mapq_key: &str,
@@ -422,6 +522,8 @@ fn add_event(
     read_pos: Option<usize>,
     high_quality_threshold: u8,
     event: EventKind,
+    ref_base: char,
+    read_base: char,
 ) {
     add_to_stats(&mut model.overall, event);
     add_to_stats(
@@ -438,6 +540,13 @@ fn add_event(
         high_quality_threshold,
         event,
     );
+    let event_key = EventKey {
+        baseq: exact_q_label(baseq_for_position),
+        event: event.label().to_string(),
+        ref_base,
+        read_base,
+    };
+    *model.by_event.entry(event_key).or_default() += 1;
 }
 
 fn in_clip(pos0: i64, clips: Option<&[(i64, i64)]>) -> bool {
@@ -705,6 +814,8 @@ fn process_record(
                                     } else {
                                         EventKind::Mismatch
                                     },
+                                    base_char(fb),
+                                    base_char(rb),
                                 );
                             }
                         }
@@ -732,6 +843,8 @@ fn process_record(
                                 Some(read_pos_5prime(record, read_pos)),
                                 cfg.high_quality_threshold,
                                 EventKind::Insertion,
+                                '-',
+                                base_char(rb),
                             );
                         }
                     }
@@ -751,6 +864,9 @@ fn process_record(
                     anchor_read_pos.map(|pos| read_pos_5prime(record, pos));
                 for _ in 0..len {
                     if in_clip(ref_pos, clips) && site_allowed(site_filter, chrom, ref_pos) {
+                        let ref_idx = (ref_pos - start0) as usize;
+                        let deleted_base =
+                            ref_seq.get(ref_idx).copied().map(base_char).unwrap_or('N');
                         add_event(
                             model,
                             &mapq_key,
@@ -759,6 +875,8 @@ fn process_record(
                             anchor_read_pos_5prime,
                             cfg.high_quality_threshold,
                             EventKind::Deletion,
+                            deleted_base,
+                            '-',
                         );
                     }
                     last_ref_pos = Some(ref_pos);
@@ -874,6 +992,28 @@ fn maybe_write_position_model(model: &Model, path: &Option<String>) -> Result<()
     writer
         .flush()
         .map_err(|e| format!("failed to flush position TSV '{path}': {e}"))?;
+    Ok(())
+}
+
+fn maybe_write_event_model(model: &Model, path: &Option<String>) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let file = File::create(path).map_err(|e| format!("failed to create '{path}': {e}"))?;
+    let mut writer = BufWriter::new(file);
+    writeln!(writer, "baseq\tevent\tref_base\tread_base\tobservations")
+        .map_err(|e| format!("failed to write event TSV header: {e}"))?;
+    for (key, count) in &model.by_event {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}",
+            key.baseq, key.event, key.ref_base, key.read_base, count
+        )
+        .map_err(|e| format!("failed to write event TSV: {e}"))?;
+    }
+    writer
+        .flush()
+        .map_err(|e| format!("failed to flush event TSV '{path}': {e}"))?;
     Ok(())
 }
 
@@ -1002,6 +1142,11 @@ fn run() -> Result<(), String> {
                 .to_string(),
         );
     }
+    if let (Some(position_tsv), Some(event_tsv)) = (&cfg.position_tsv, &cfg.event_tsv) {
+        if normalized_output_path(position_tsv)? == normalized_output_path(event_tsv)? {
+            return Err("--position-tsv and --event-tsv must be different paths".to_string());
+        }
+    }
     let fai = load_fai(&cfg.reference)?;
     let site_filter = build_site_filter(&cfg, &fai)?;
     let mut model = Model::default();
@@ -1012,6 +1157,7 @@ fn run() -> Result<(), String> {
     }
     print_model(&model);
     maybe_write_position_model(&model, &cfg.position_tsv)?;
+    maybe_write_event_model(&model, &cfg.event_tsv)?;
     Ok(())
 }
 

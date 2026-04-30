@@ -52,6 +52,23 @@ if "$bin" --reference "$fixtures/ref.fa" --max-reads 1 --skip-high-nonref-fracti
 fi
 grep -q -- '--skip-high-nonref-fraction cannot be combined with --max-reads' "$tmp/site-max.err"
 
+if "$bin" --reference "$fixtures/ref.fa" --position-tsv "$tmp/same.tsv" --event-tsv "$tmp/same.tsv" "$fixtures/read_phase.bam" > "$tmp/same.out" 2> "$tmp/same.err"; then
+  echo "bam_error_model unexpectedly allowed sidecars to share one path" >&2
+  exit 1
+fi
+grep -q -- '--position-tsv and --event-tsv must be different paths' "$tmp/same.err"
+if "$bin" --reference "$fixtures/ref.fa" --position-tsv "$tmp/alias.tsv" --event-tsv "$tmp/./alias.tsv" "$fixtures/read_phase.bam" > "$tmp/alias.out" 2> "$tmp/alias.err"; then
+  echo "bam_error_model unexpectedly allowed sidecar alias paths" >&2
+  exit 1
+fi
+grep -q -- '--position-tsv and --event-tsv must be different paths' "$tmp/alias.err"
+ln -s symlink-real.tsv "$tmp/symlink-alias.tsv"
+if "$bin" --reference "$fixtures/ref.fa" --position-tsv "$tmp/symlink-real.tsv" --event-tsv "$tmp/symlink-alias.tsv" "$fixtures/read_phase.bam" > "$tmp/symlink.out" 2> "$tmp/symlink.err"; then
+  echo "bam_error_model unexpectedly allowed sidecar symlink aliases" >&2
+  exit 1
+fi
+grep -q -- '--position-tsv and --event-tsv must be different paths' "$tmp/symlink.err"
+
 "$bin" \
   --reference "$fixtures/ref.fa" \
   --region chr1:1-6 \
@@ -63,6 +80,18 @@ grep -qx $'1\thigh\t4\t2\t2\t0\t0\t0.500000\t3.010' "$tmp/positions.tsv"
 grep -qx $'3\tall\t4\t4\t0\t0\t0\t0.000000\tinf' "$tmp/positions.tsv"
 
 grep -qx $'overall\tall\t24\t16\t8\t0\t0\t0.333333\t4.771' "$tmp/model.with-positions.tsv"
+
+"$bin" \
+  --reference "$fixtures/ref.fa" \
+  --region chr1:1-6 \
+  --event-tsv "$tmp/events.tsv" \
+  "$fixtures/read_phase.bam" > "$tmp/model.with-events.tsv"
+grep -qx $'baseq\tevent\tref_base\tread_base\tobservations' "$tmp/events.tsv"
+grep -qx $'40\tmatch\tA\tA\t4' "$tmp/events.tsv"
+grep -qx $'40\tmatch\tC\tC\t6' "$tmp/events.tsv"
+grep -qx $'40\tsubstitution\tA\tG\t4' "$tmp/events.tsv"
+grep -qx $'40\tsubstitution\tC\tT\t2' "$tmp/events.tsv"
+grep -qx $'overall\tall\t24\t16\t8\t0\t0\t0.333333\t4.771' "$tmp/model.with-events.tsv"
 
 cat > "$tmp/rev.fa" <<'EOF'
 >chr1
@@ -83,10 +112,11 @@ cat > "$tmp/indel.sam" <<'EOF'
 @SQ	SN:chr1	LN:4
 del	0	chr1	1	60	1M1D2M	*	0	0	AGT	III
 EOF
-"$bin" --reference "$tmp/rev.fa" --position-tsv "$tmp/indel.positions.tsv" "$tmp/indel.sam" > "$tmp/indel.tsv"
+"$bin" --reference "$tmp/rev.fa" --position-tsv "$tmp/indel.positions.tsv" --event-tsv "$tmp/indel.events.tsv" "$tmp/indel.sam" > "$tmp/indel.tsv"
 grep -qx $'overall\tall\t4\t3\t0\t0\t1\t0.250000\t6.021' "$tmp/indel.tsv"
 grep -qx $'baseq\t40-49\t3\t3\t0\t0\t0\t0.000000\tinf' "$tmp/indel.tsv"
 grep -qx $'1\tall\t2\t1\t0\t0\t1\t0.500000\t3.010' "$tmp/indel.positions.tsv"
+grep -qx $'40\tdeletion\tC\t-\t1' "$tmp/indel.events.tsv"
 
 cat > "$tmp/ins_hotspot.sam" <<'EOF'
 @HD	VN:1.6	SO:unknown
@@ -95,6 +125,8 @@ ins1	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
 ins2	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
 ins3	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
 EOF
+"$bin" --reference "$tmp/rev.fa" --event-tsv "$tmp/ins_hotspot.events.tsv" "$tmp/ins_hotspot.sam" > "$tmp/ins_hotspot.unfiltered.tsv"
+grep -qx $'40\tinsertion\t-\tT\t3' "$tmp/ins_hotspot.events.tsv"
 "$bin" --reference "$tmp/rev.fa" --skip-high-nonref-fraction 0.35 "$tmp/ins_hotspot.sam" > "$tmp/ins_hotspot.tsv"
 grep -qx $'#reads\t3' "$tmp/ins_hotspot.tsv"
 grep -qx $'overall\tall\t9\t9\t0\t0\t0\t0.000000\tinf' "$tmp/ins_hotspot.tsv"
@@ -120,6 +152,11 @@ if [[ -e /dev/full ]]; then
     exit 1
   fi
   grep -q 'failed to .*position TSV' "$tmp/full.err"
+  if "$bin" --reference "$fixtures/ref.fa" --event-tsv /dev/full "$fixtures/read_phase.bam" > "$tmp/full-event.out" 2> "$tmp/full-event.err"; then
+    echo "bam_error_model unexpectedly succeeded when --event-tsv could not be written" >&2
+    exit 1
+  fi
+  grep -q 'failed to .*event TSV' "$tmp/full-event.err"
 fi
 
 "$bin" \

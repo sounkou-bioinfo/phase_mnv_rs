@@ -59,8 +59,12 @@ It applies no MAPQ cutoff by default and reports MAPQ/base-quality bins rather
 than filtering on them. It can also write an htsbox `mapchk`-inspired
 per-read-position TSV: positions are one-based from the original read 5' end
 (reverse-strand alignments are reversed), with all/low/high/unknown base-quality
-groups controlled by `--high-quality-threshold`. For calibration windows,
-`--skip-high-nonref-fraction F` performs a mapchk-like site guard: positions
+groups controlled by `--high-quality-threshold`. Its `--event-tsv` sidecar emits
+exact base quality plus event/ref/read-base composition rows; deletion events are
+anchored to the neighboring read base quality when available. This composition
+sidecar is more privacy-sensitive than the coarse aggregate summary on tiny or
+private intervals because it exposes ref/read base composition directly. For calibration
+windows, `--skip-high-nonref-fraction F` performs a mapchk-like site guard: positions
 with at least three high-quality observations and non-reference/indel fraction
 greater than `F` are excluded from the final summaries. This guard performs a
 calibration prepass over the complete input or selected regions and therefore

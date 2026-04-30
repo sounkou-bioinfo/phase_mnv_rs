@@ -277,6 +277,7 @@ options:
 --max-reads N         Stop after N usable reads
 --min-mapq N          Optional MAPQ cutoff (default: 0; no cutoff)
 --position-tsv FILE   Write per-read-position empirical error TSV
+--event-tsv FILE      Write exact-Q event/ref/read-base composition TSV
 --high-quality-threshold N  BaseQ threshold for high/low position groups (default: 20)
 --skip-high-nonref-fraction F  Skip likely variant sites above high-Q non-ref fraction F (off)
 --include-duplicates  Include duplicate reads
@@ -499,7 +500,12 @@ MAPQ filter by default. It reports base-quality and MAPQ bins so a future
 scoring. Its optional `--position-tsv` output is inspired by Heng Li's htsbox
 `mapchk`: rows are keyed by one-based read position from the read 5' end
 (reverse-strand alignments are reversed) and split into all/low/high/unknown
-base-quality groups using `--high-quality-threshold`. For small calibration
+base-quality groups using `--high-quality-threshold`. Its optional
+`--event-tsv` sidecar records exact base quality plus event/ref/read-base
+composition rows, which is useful for diagnosing patterns such as Q5 insertion
+enrichment or recurrent substitutions. Because this sidecar exposes per-base
+composition for the requested regions, treat it as more privacy-sensitive than
+the coarse aggregate summary on tiny or private intervals. For small calibration
 windows, `--skip-high-nonref-fraction F` performs a mapchk-like guard against
 likely variant/systematic-error sites by dropping positions where at least three
 high-quality observations have non-reference/indel fraction greater than `F`.
