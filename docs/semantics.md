@@ -59,10 +59,15 @@ It applies no MAPQ cutoff by default and reports MAPQ/base-quality bins rather
 than filtering on them. It can also write an htsbox `mapchk`-inspired
 per-read-position TSV: positions are one-based from the original read 5' end
 (reverse-strand alignments are reversed), with all/low/high/unknown base-quality
-groups controlled by `--high-quality-threshold`. Known variant sites are not
-masked yet, so its mismatch rate should be treated as an error-plus-variation
-estimate unless callers restrict the input to high-confidence
-homozygous-reference regions.
+groups controlled by `--high-quality-threshold`. For calibration windows,
+`--skip-high-nonref-fraction F` performs a mapchk-like site guard: positions
+with at least three high-quality observations and non-reference/indel fraction
+greater than `F` are excluded from the final summaries. This guard performs a
+calibration prepass over the complete input or selected regions and therefore
+cannot be combined with `--max-reads`. Known variant sites are otherwise not
+masked, so its mismatch rate should be treated as an error-plus-variation
+estimate unless callers restrict the input to high-confidence homozygous-reference
+regions or enable the optional site guard.
 
 For comparison against the established upstream phaser,
 `scripts/phase_from_bam_then_mnv.sh` provides a local workflow that:

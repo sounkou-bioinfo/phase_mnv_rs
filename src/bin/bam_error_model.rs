@@ -21,6 +21,7 @@ options:\n\
       --min-mapq N          Optional MAPQ cutoff (default: 0; no cutoff)\n\
       --position-tsv FILE   Write per-read-position empirical error TSV\n\
       --high-quality-threshold N  BaseQ threshold for high/low position groups (default: 20)\n\
+      --skip-high-nonref-fraction F  Skip likely variant sites above high-Q non-ref fraction F (off)\n\
       --include-duplicates  Include duplicate reads\n\
       --include-secondary   Include secondary alignments\n\
       --include-supplementary Include supplementary alignments\n\
@@ -36,6 +37,7 @@ struct Config {
     min_mapq: u8,
     position_tsv: Option<String>,
     high_quality_threshold: u8,
+    skip_high_nonref_fraction: Option<f64>,
     include_duplicates: bool,
     include_secondary: bool,
     include_supplementary: bool,
@@ -99,6 +101,29 @@ struct PositionStats {
     unknown: Stats,
 }
 
+#[derive(Debug, Default)]
+struct SiteCounts {
+    high_total: u64,
+    high_nonref: u64,
+}
+
+#[derive(Debug, Default)]
+struct SiteFilter {
+    skip: BTreeMap<String, BTreeMap<i64, SiteCounts>>,
+}
+
+impl SiteFilter {
+    fn is_skipped(&self, chrom: &str, pos0: i64) -> bool {
+        self.skip
+            .get(chrom)
+            .is_some_and(|positions| positions.contains_key(&pos0))
+    }
+}
+
+fn site_allowed(site_filter: Option<&SiteFilter>, chrom: &str, pos0: i64) -> bool {
+    !site_filter.is_some_and(|filter| filter.is_skipped(chrom, pos0))
+}
+
 struct Fai(*mut htslib::faidx_t);
 
 impl Drop for Fai {
@@ -115,6 +140,11 @@ fn die(msg: &str) -> ! {
 fn parse_i64(s: &str, name: &str) -> i64 {
     s.parse::<i64>()
         .unwrap_or_else(|_| die(&format!("{name} must be an integer")))
+}
+
+fn parse_f64(s: &str, name: &str) -> f64 {
+    s.parse::<f64>()
+        .unwrap_or_else(|_| die(&format!("{name} must be a number")))
 }
 
 fn parse_region(s: &str) -> Region {
@@ -151,6 +181,7 @@ fn parse_args() -> Config {
     let mut min_mapq = 0u8;
     let mut position_tsv = None;
     let mut high_quality_threshold = 20u8;
+    let mut skip_high_nonref_fraction = None;
     let mut include_duplicates = false;
     let mut include_secondary = false;
     let mut include_supplementary = false;
@@ -213,6 +244,17 @@ fn parse_args() -> Config {
                 }
                 high_quality_threshold = n as u8;
             }
+            "--skip-high-nonref-fraction" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--skip-high-nonref-fraction requires an argument");
+                }
+                let f = parse_f64(&args[i], "--skip-high-nonref-fraction");
+                if !(0.0..=1.0).contains(&f) {
+                    die("--skip-high-nonref-fraction must be between 0 and 1");
+                }
+                skip_high_nonref_fraction = Some(f);
+            }
             "--include-duplicates" => include_duplicates = true,
             "--include-secondary" => include_secondary = true,
             "--include-supplementary" => include_supplementary = true,
@@ -234,6 +276,7 @@ fn parse_args() -> Config {
         min_mapq,
         position_tsv,
         high_quality_threshold,
+        skip_high_nonref_fraction,
         include_duplicates,
         include_secondary,
         include_supplementary,
@@ -406,6 +449,209 @@ fn in_clip(pos0: i64, clips: Option<&[(i64, i64)]>) -> bool {
     }
 }
 
+fn add_site_count(
+    counts: &mut BTreeMap<String, BTreeMap<i64, SiteCounts>>,
+    chrom: &str,
+    pos0: i64,
+    is_nonref: bool,
+) {
+    let entry = counts
+        .entry(chrom.to_string())
+        .or_default()
+        .entry(pos0)
+        .or_default();
+    entry.high_total += 1;
+    if is_nonref {
+        entry.high_nonref += 1;
+    }
+}
+
+fn collect_site_counts_for_record(
+    record: &bam::Record,
+    chrom: &str,
+    fai: &Fai,
+    cfg: &Config,
+    counts: &mut BTreeMap<String, BTreeMap<i64, SiteCounts>>,
+    clips: Option<&[(i64, i64)]>,
+) -> Result<(), String> {
+    if !usable_record(record, cfg) {
+        return Ok(());
+    }
+    let start0 = record.pos();
+    let end0 = record.cigar().end_pos();
+    if start0 < 0 || end0 <= start0 {
+        return Ok(());
+    }
+    let ref_seq = fetch_ref(fai, chrom, start0, end0)?;
+    let seq = record.seq();
+    let qual = record.qual();
+    let mut ref_pos = start0;
+    let mut read_pos = 0usize;
+    let mut last_ref_pos: Option<i64> = None;
+
+    for cigar in record.cigar().iter() {
+        match *cigar {
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                for _ in 0..len {
+                    if in_clip(ref_pos, clips) && read_pos < seq.len() {
+                        let ref_idx = (ref_pos - start0) as usize;
+                        if ref_idx < ref_seq.len() {
+                            let rb = seq[read_pos].to_ascii_uppercase();
+                            let fb = ref_seq[ref_idx];
+                            let q = qual.get(read_pos).copied().unwrap_or(255);
+                            if q != 255
+                                && q >= cfg.high_quality_threshold
+                                && is_acgt(rb)
+                                && is_acgt(fb)
+                            {
+                                add_site_count(counts, chrom, ref_pos, rb != fb);
+                            }
+                        }
+                    }
+                    last_ref_pos = Some(ref_pos);
+                    ref_pos += 1;
+                    read_pos += 1;
+                }
+            }
+            Cigar::Ins(len) => {
+                let anchor_pos = last_ref_pos.unwrap_or(ref_pos);
+                if in_clip(anchor_pos, clips) {
+                    let mut min_q: Option<u8> = None;
+                    for offset in 0..len as usize {
+                        if let Some(q) = qual.get(read_pos + offset).copied() {
+                            min_q = Some(min_q.map_or(q, |prev| prev.min(q)));
+                        }
+                    }
+                    if min_q.is_some_and(|q| q != 255 && q >= cfg.high_quality_threshold) {
+                        add_site_count(counts, chrom, anchor_pos, true);
+                    }
+                }
+                read_pos += len as usize;
+            }
+            Cigar::Del(len) => {
+                let anchor_read_pos = if read_pos > 0 {
+                    Some(read_pos - 1)
+                } else if read_pos < record.seq_len() {
+                    Some(read_pos)
+                } else {
+                    None
+                };
+                let anchor_q = anchor_read_pos.and_then(|pos| qual.get(pos).copied());
+                for _ in 0..len {
+                    if in_clip(ref_pos, clips)
+                        && anchor_q.is_some_and(|q| q != 255 && q >= cfg.high_quality_threshold)
+                    {
+                        add_site_count(counts, chrom, ref_pos, true);
+                    }
+                    last_ref_pos = Some(ref_pos);
+                    ref_pos += 1;
+                }
+            }
+            Cigar::RefSkip(len) => ref_pos += len as i64,
+            Cigar::SoftClip(len) => read_pos += len as usize,
+            Cigar::HardClip(_) | Cigar::Pad(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn finalize_site_filter(
+    counts: BTreeMap<String, BTreeMap<i64, SiteCounts>>,
+    fraction: f64,
+) -> SiteFilter {
+    let mut filter = SiteFilter::default();
+    for (chrom, positions) in counts {
+        for (pos0, site) in positions {
+            if site.high_total >= 3 && (site.high_nonref as f64 / site.high_total as f64) > fraction
+            {
+                filter
+                    .skip
+                    .entry(chrom.clone())
+                    .or_default()
+                    .insert(pos0, site);
+            }
+        }
+    }
+    filter
+}
+
+fn build_stream_site_filter(cfg: &Config, fai: &Fai, fraction: f64) -> Result<SiteFilter, String> {
+    let mut reader = bam::Reader::from_path(&cfg.bam)
+        .map_err(|e| format!("cannot open BAM/CRAM '{}': {e}", cfg.bam))?;
+    reader
+        .set_reference(&cfg.reference)
+        .map_err(|e| format!("failed to set CRAM reference '{}': {e}", cfg.reference))?;
+    let header = bam::Header::from_template(reader.header());
+    let header_view = bam::HeaderView::from_header(&header);
+    let mut counts: BTreeMap<String, BTreeMap<i64, SiteCounts>> = BTreeMap::new();
+    for rec in reader.records() {
+        let record = rec.map_err(|e| format!("failed to read BAM/CRAM record: {e}"))?;
+        if record.tid() < 0 || !usable_record(&record, cfg) {
+            continue;
+        }
+        let chrom = String::from_utf8_lossy(header_view.tid2name(record.tid() as u32)).into_owned();
+        collect_site_counts_for_record(&record, &chrom, fai, cfg, &mut counts, None)?;
+    }
+    Ok(finalize_site_filter(counts, fraction))
+}
+
+fn build_region_site_filter(cfg: &Config, fai: &Fai, fraction: f64) -> Result<SiteFilter, String> {
+    let mut reader = bam::IndexedReader::from_path(&cfg.bam)
+        .map_err(|e| format!("cannot open indexed BAM/CRAM '{}': {e}", cfg.bam))?;
+    reader
+        .set_reference(&cfg.reference)
+        .map_err(|e| format!("failed to set CRAM reference '{}': {e}", cfg.reference))?;
+    let header = bam::Header::from_template(reader.header());
+    let header_view = bam::HeaderView::from_header(&header);
+    let mut counts: BTreeMap<String, BTreeMap<i64, SiteCounts>> = BTreeMap::new();
+
+    for (chrom, clips) in grouped_regions(&cfg.regions) {
+        let fetch_start = clips.iter().map(|&(start0, _)| start0).min().unwrap_or(0);
+        let fetch_end = clips
+            .iter()
+            .map(|&(_, end0)| end0)
+            .max()
+            .unwrap_or(fetch_start);
+        reader
+            .fetch((chrom.as_bytes(), fetch_start, fetch_end))
+            .map_err(|e| {
+                format!(
+                    "failed to fetch {chrom}:{}-{}: {e}",
+                    fetch_start + 1,
+                    fetch_end
+                )
+            })?;
+        for rec in reader.records() {
+            let record = rec.map_err(|e| format!("failed to read BAM/CRAM record: {e}"))?;
+            if record.tid() < 0 || !usable_record(&record, cfg) {
+                continue;
+            }
+            let record_chrom =
+                String::from_utf8_lossy(header_view.tid2name(record.tid() as u32)).into_owned();
+            collect_site_counts_for_record(
+                &record,
+                &record_chrom,
+                fai,
+                cfg,
+                &mut counts,
+                Some(&clips),
+            )?;
+        }
+    }
+    Ok(finalize_site_filter(counts, fraction))
+}
+
+fn build_site_filter(cfg: &Config, fai: &Fai) -> Result<Option<SiteFilter>, String> {
+    let Some(fraction) = cfg.skip_high_nonref_fraction else {
+        return Ok(None);
+    };
+    if cfg.regions.is_empty() {
+        build_stream_site_filter(cfg, fai, fraction).map(Some)
+    } else {
+        build_region_site_filter(cfg, fai, fraction).map(Some)
+    }
+}
+
 fn process_record(
     record: &bam::Record,
     chrom: &str,
@@ -413,6 +659,7 @@ fn process_record(
     cfg: &Config,
     model: &mut Model,
     clips: Option<&[(i64, i64)]>,
+    site_filter: Option<&SiteFilter>,
 ) -> Result<bool, String> {
     if !usable_record(record, cfg) {
         return Ok(false);
@@ -440,7 +687,11 @@ fn process_record(
                         if ref_idx < ref_seq.len() {
                             let rb = seq[read_pos].to_ascii_uppercase();
                             let fb = ref_seq[ref_idx];
-                            if in_clip(ref_pos, clips) && is_acgt(rb) && is_acgt(fb) {
+                            if in_clip(ref_pos, clips)
+                                && site_allowed(site_filter, chrom, ref_pos)
+                                && is_acgt(rb)
+                                && is_acgt(fb)
+                            {
                                 let q = qual.get(read_pos).copied().unwrap_or(255);
                                 add_event(
                                     model,
@@ -466,7 +717,10 @@ fn process_record(
             Cigar::Ins(len) => {
                 let anchor_pos = last_ref_pos.unwrap_or(ref_pos);
                 for _ in 0..len {
-                    if in_clip(anchor_pos, clips) && read_pos < seq.len() {
+                    if in_clip(anchor_pos, clips)
+                        && site_allowed(site_filter, chrom, anchor_pos)
+                        && read_pos < seq.len()
+                    {
                         let rb = seq[read_pos].to_ascii_uppercase();
                         if is_acgt(rb) {
                             let q = qual.get(read_pos).copied().unwrap_or(255);
@@ -496,7 +750,7 @@ fn process_record(
                 let anchor_read_pos_5prime =
                     anchor_read_pos.map(|pos| read_pos_5prime(record, pos));
                 for _ in 0..len {
-                    if in_clip(ref_pos, clips) {
+                    if in_clip(ref_pos, clips) && site_allowed(site_filter, chrom, ref_pos) {
                         add_event(
                             model,
                             &mapq_key,
@@ -623,7 +877,12 @@ fn maybe_write_position_model(model: &Model, path: &Option<String>) -> Result<()
     Ok(())
 }
 
-fn run_stream(cfg: &Config, fai: &Fai, model: &mut Model) -> Result<(), String> {
+fn run_stream(
+    cfg: &Config,
+    fai: &Fai,
+    model: &mut Model,
+    site_filter: Option<&SiteFilter>,
+) -> Result<(), String> {
     let mut reader = bam::Reader::from_path(&cfg.bam)
         .map_err(|e| format!("cannot open BAM/CRAM '{}': {e}", cfg.bam))?;
     reader
@@ -642,7 +901,7 @@ fn run_stream(cfg: &Config, fai: &Fai, model: &mut Model) -> Result<(), String> 
             continue;
         }
         let chrom = String::from_utf8_lossy(header_view.tid2name(record.tid() as u32)).into_owned();
-        process_record(&record, &chrom, fai, cfg, model, None)?;
+        process_record(&record, &chrom, fai, cfg, model, None, site_filter)?;
     }
     Ok(())
 }
@@ -679,7 +938,12 @@ fn grouped_regions(regions: &[Region]) -> BTreeMap<String, Vec<(i64, i64)>> {
     grouped
 }
 
-fn run_regions(cfg: &Config, fai: &Fai, model: &mut Model) -> Result<(), String> {
+fn run_regions(
+    cfg: &Config,
+    fai: &Fai,
+    model: &mut Model,
+    site_filter: Option<&SiteFilter>,
+) -> Result<(), String> {
     let mut reader = bam::IndexedReader::from_path(&cfg.bam)
         .map_err(|e| format!("cannot open indexed BAM/CRAM '{}': {e}", cfg.bam))?;
     reader
@@ -716,7 +980,15 @@ fn run_regions(cfg: &Config, fai: &Fai, model: &mut Model) -> Result<(), String>
             }
             let record_chrom =
                 String::from_utf8_lossy(header_view.tid2name(record.tid() as u32)).into_owned();
-            process_record(&record, &record_chrom, fai, cfg, model, Some(&clips))?;
+            process_record(
+                &record,
+                &record_chrom,
+                fai,
+                cfg,
+                model,
+                Some(&clips),
+                site_filter,
+            )?;
         }
     }
     Ok(())
@@ -724,12 +996,19 @@ fn run_regions(cfg: &Config, fai: &Fai, model: &mut Model) -> Result<(), String>
 
 fn run() -> Result<(), String> {
     let cfg = parse_args();
+    if cfg.skip_high_nonref_fraction.is_some() && cfg.max_reads.is_some() {
+        return Err(
+            "--skip-high-nonref-fraction cannot be combined with --max-reads; calibrate from the complete input or selected regions"
+                .to_string(),
+        );
+    }
     let fai = load_fai(&cfg.reference)?;
+    let site_filter = build_site_filter(&cfg, &fai)?;
     let mut model = Model::default();
     if cfg.regions.is_empty() {
-        run_stream(&cfg, &fai, &mut model)?;
+        run_stream(&cfg, &fai, &mut model, site_filter.as_ref())?;
     } else {
-        run_regions(&cfg, &fai, &mut model)?;
+        run_regions(&cfg, &fai, &mut model, site_filter.as_ref())?;
     }
     print_model(&model);
     maybe_write_position_model(&model, &cfg.position_tsv)?;

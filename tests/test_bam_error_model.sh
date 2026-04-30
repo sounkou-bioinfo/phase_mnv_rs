@@ -22,6 +22,39 @@ grep -qx $'mapq\t60+\t24\t16\t8\t0\t0\t0.333333\t4.771' "$tmp/model.tsv"
 "$bin" \
   --reference "$fixtures/ref.fa" \
   --region chr1:1-6 \
+  --skip-high-nonref-fraction 0.35 \
+  "$fixtures/read_phase.bam" > "$tmp/model.site-filtered.tsv"
+grep -qx $'#reads\t4' "$tmp/model.site-filtered.tsv"
+grep -qx $'overall\tall\t8\t8\t0\t0\t0\t0.000000\tinf' "$tmp/model.site-filtered.tsv"
+
+"$bin" \
+  --reference "$fixtures/ref.fa" \
+  --skip-high-nonref-fraction 0.35 \
+  "$fixtures/read_phase.bam" > "$tmp/model.site-filtered.stream.tsv"
+grep -qx $'overall\tall\t8\t8\t0\t0\t0\t0.000000\tinf' "$tmp/model.site-filtered.stream.tsv"
+
+"$bin" \
+  --reference "$fixtures/ref.fa" \
+  --region chr1:1-6 \
+  --skip-high-nonref-fraction 0.50 \
+  "$fixtures/read_phase.bam" > "$tmp/model.site-threshold.tsv"
+grep -qx $'overall\tall\t24\t16\t8\t0\t0\t0.333333\t4.771' "$tmp/model.site-threshold.tsv"
+
+if "$bin" --reference "$fixtures/ref.fa" --skip-high-nonref-fraction 1.5 "$fixtures/read_phase.bam" > "$tmp/bad-fraction.out" 2> "$tmp/bad-fraction.err"; then
+  echo "bam_error_model unexpectedly accepted invalid --skip-high-nonref-fraction" >&2
+  exit 1
+fi
+grep -q -- '--skip-high-nonref-fraction must be between 0 and 1' "$tmp/bad-fraction.err"
+
+if "$bin" --reference "$fixtures/ref.fa" --max-reads 1 --skip-high-nonref-fraction 0.35 "$fixtures/read_phase.bam" > "$tmp/site-max.out" 2> "$tmp/site-max.err"; then
+  echo "bam_error_model unexpectedly combined --max-reads with --skip-high-nonref-fraction" >&2
+  exit 1
+fi
+grep -q -- '--skip-high-nonref-fraction cannot be combined with --max-reads' "$tmp/site-max.err"
+
+"$bin" \
+  --reference "$fixtures/ref.fa" \
+  --region chr1:1-6 \
   --position-tsv "$tmp/positions.tsv" \
   "$fixtures/read_phase.bam" > "$tmp/model.with-positions.tsv"
 grep -qx $'read_pos\tbaseq_group\tobservations\tmatches\tmismatches\tinsertions\tdeletions\terror_rate\tempirical_q' "$tmp/positions.tsv"
@@ -54,6 +87,32 @@ EOF
 grep -qx $'overall\tall\t4\t3\t0\t0\t1\t0.250000\t6.021' "$tmp/indel.tsv"
 grep -qx $'baseq\t40-49\t3\t3\t0\t0\t0\t0.000000\tinf' "$tmp/indel.tsv"
 grep -qx $'1\tall\t2\t1\t0\t0\t1\t0.500000\t3.010' "$tmp/indel.positions.tsv"
+
+cat > "$tmp/ins_hotspot.sam" <<'EOF'
+@HD	VN:1.6	SO:unknown
+@SQ	SN:chr1	LN:4
+ins1	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
+ins2	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
+ins3	0	chr1	1	60	1M1I3M	*	0	0	ATCGT	IIIII
+EOF
+"$bin" --reference "$tmp/rev.fa" --skip-high-nonref-fraction 0.35 "$tmp/ins_hotspot.sam" > "$tmp/ins_hotspot.tsv"
+grep -qx $'#reads\t3' "$tmp/ins_hotspot.tsv"
+grep -qx $'overall\tall\t9\t9\t0\t0\t0\t0.000000\tinf' "$tmp/ins_hotspot.tsv"
+
+cat > "$tmp/del_hotspot.sam" <<'EOF'
+@HD	VN:1.6	SO:unknown
+@SQ	SN:chr1	LN:4
+del1	0	chr1	1	60	1M1D2M	*	0	0	AGT	III
+del2	0	chr1	1	60	1M1D2M	*	0	0	AGT	III
+del3	0	chr1	1	60	1M1D2M	*	0	0	AGT	III
+EOF
+"$bin" --reference "$tmp/rev.fa" --skip-high-nonref-fraction 0.35 "$tmp/del_hotspot.sam" > "$tmp/del_hotspot.tsv"
+grep -qx $'#reads\t3' "$tmp/del_hotspot.tsv"
+grep -qx $'overall\tall\t9\t9\t0\t0\t0\t0.000000\tinf' "$tmp/del_hotspot.tsv"
+
+"$bin" --reference "$fixtures/ref.fa" --region chr1:2-4 --skip-high-nonref-fraction 0.35 "$fixtures/del_hotspot.bam" > "$tmp/del_hotspot.region.tsv"
+grep -qx $'#reads\t3' "$tmp/del_hotspot.region.tsv"
+grep -qx $'overall\tall\t6\t6\t0\t0\t0\t0.000000\tinf' "$tmp/del_hotspot.region.tsv"
 
 if [[ -e /dev/full ]]; then
   if "$bin" --reference "$fixtures/ref.fa" --position-tsv /dev/full "$fixtures/read_phase.bam" > "$tmp/full.out" 2> "$tmp/full.err"; then
