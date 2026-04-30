@@ -27,6 +27,7 @@ phase_compare <- file.path("target", "release", "phase_compare")
 unphase_vcf <- file.path("target", "release", "unphase_vcf")
 fermi_lite_assemble <- file.path("target", "release", "fermi_lite_assemble")
 bam_error_model <- file.path("target", "release", "bam_error_model")
+phase_adjudicate <- file.path("target", "release", "phase_adjudicate")
 fixture_ref <- file.path("tests", "fixtures", "ref.fa")
 
 fence <- function(x) {
@@ -100,7 +101,7 @@ on the same phased haplotype/phase set and emits normalized `TYPE=MNV` or
 | Default output | Derived MNV/COMPLEX records only (`--emit mnv`). |
 | Canonical implementation | Rust (`src/main.rs`), built on `rust-htslib`. |
 | Native dependencies | Vendored C libraries only when useful, exposed through generated/bindgen-backed FFI wrappers. |
-| Extra Rust modes | BCF/BGZF output, all-sites output, experimental BAM/CRAM phasing, codon-aware recomposition, native phase comparison, native VCF/BCF unphasing, empirical BAM error-model summaries, and experimental fermi-lite local assembly bindings. |
+| Extra Rust modes | BCF/BGZF output, all-sites output, experimental BAM/CRAM phasing, codon-aware recomposition, native phase comparison, native VCF/BCF unphasing, empirical BAM error-model summaries, initial read-evidence phase adjudication, and experimental fermi-lite local assembly bindings. |
 
 The Rust binary uses `rust-htslib` for VCF/BCF/BAM/CRAM APIs and only drops to
 `rust_htslib::htslib` where exact htslib behavior is needed. Rust-only features
@@ -126,7 +127,8 @@ Build or install variants:
 make install          # install Rust CLIs to ~/.local/bin
 make static-release   # static Linux Rust binary when supported
 make install-static   # install static Linux binary when supported
-# cargo also builds phase_compare, unphase_vcf, fermi_lite_assemble, and bam_error_model
+# cargo also builds phase_compare, unphase_vcf, fermi_lite_assemble,
+# bam_error_model, and phase_adjudicate
 ```
 
 Override the Rust target when needed:
@@ -225,6 +227,12 @@ fence(run_tool(fermi_lite_assemble))
 
 ```{r bam-error-model-help, results='asis'}
 fence(run_tool(bam_error_model))
+```
+
+### Experimental phase adjudication helper (`phase_adjudicate`)
+
+```{r phase-adjudicate-help, results='asis'}
+fence(run_tool(phase_adjudicate))
 ```
 
 ## Examples
@@ -457,8 +465,12 @@ should be interpreted as sequencing-error-plus-variation unless regions are
 restricted to homozygous-reference/high-confidence sites or the optional site
 guard is used.
 
-Neither helper is yet integrated into `phase_compare` or a final
-`phase_adjudicate` workflow.
+`phase_adjudicate` is an initial read-evidence helper for rows from
+`phase_compare --pair-tsv`. It currently supports biallelic SNV pairs, counts
+indexed BAM/CRAM reads spanning both sites, applies no MAPQ/baseQ filter by
+default, and emits a TSV winner/support/ambiguity summary. It is not yet a final
+assembly-aware adjudication workflow and does not consume `bam_error_model` or
+fermi-lite outputs directly.
 
 If you use fermi-lite-backed local assembly results, cite the FermiKit paper
 recommended by fermi-lite (Li 2015, Bioinformatics; doi:10.1093/bioinformatics/btv440).

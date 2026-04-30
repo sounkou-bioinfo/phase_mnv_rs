@@ -73,6 +73,15 @@ masked, so its mismatch rate should be treated as an error-plus-variation
 estimate unless callers restrict the input to high-confidence homozygous-reference
 regions or enable the optional site guard.
 
+`phase_adjudicate` is an experimental pair-level read-evidence helper. It takes
+`phase_compare --pair-tsv`, an indexed BAM/CRAM, and a VCF/BCF containing the
+same biallelic SNV sites. For each pair, it counts reads spanning both sites,
+derives observed allele parity, and compares that parity to the truth/query
+phased GT patterns in the pair TSV. MAPQ and baseQ are summarized and optional
+thresholds default to zero, so there is no default hard MAPQ/baseQ exclusion.
+The current scope is deliberately narrow: SNV pairs only, no local assembly, and
+no empirical-error weighting yet.
+
 For comparison against the established upstream phaser,
 `scripts/phase_from_bam_then_mnv.sh` provides a local workflow that:
 

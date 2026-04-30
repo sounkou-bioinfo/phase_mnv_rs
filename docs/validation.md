@@ -42,6 +42,9 @@ Behavior fixtures cover:
 - empirical BAM error-model summary, exact-Q event composition TSV,
   mapchk-like high-nonref site guard, and per-read-position TSV coverage through
   `bam_error_model` on tracked BAM/SAM fixtures, with no MAPQ filter by default
+- experimental `phase_adjudicate` pair-level read-evidence coverage on tracked
+  VCF/BAM fixtures, including same-phase rows, switched truth/query parity, and
+  explicit baseQ filtering
 
 ## Negative/failure-mode fixtures
 

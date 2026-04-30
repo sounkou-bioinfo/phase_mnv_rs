@@ -59,36 +59,42 @@ jobs:
             unphase="target/${host}/release/unphase_vcf"
             fermi_lite="target/${host}/release/fermi_lite_assemble"
             bam_error_model="target/${host}/release/bam_error_model"
+            phase_adjudicate="target/${host}/release/phase_adjudicate"
           else
             bin="target/release/phase_mnv_rs"
             phase_compare="target/release/phase_compare"
             unphase="target/release/unphase_vcf"
             fermi_lite="target/release/fermi_lite_assemble"
             bam_error_model="target/release/bam_error_model"
+            phase_adjudicate="target/release/phase_adjudicate"
           fi
           test -x "$bin"
           test -x "$phase_compare"
           test -x "$unphase"
           test -x "$fermi_lite"
           test -x "$bam_error_model"
+          test -x "$phase_adjudicate"
           echo "path=$bin" >> "$GITHUB_OUTPUT"
           echo "phase_compare=$phase_compare" >> "$GITHUB_OUTPUT"
           echo "unphase=$unphase" >> "$GITHUB_OUTPUT"
           echo "fermi_lite=$fermi_lite" >> "$GITHUB_OUTPUT"
           echo "bam_error_model=$bam_error_model" >> "$GITHUB_OUTPUT"
-          file "$bin" "$phase_compare" "$unphase" "$fermi_lite" "$bam_error_model"
+          echo "phase_adjudicate=$phase_adjudicate" >> "$GITHUB_OUTPUT"
+          file "$bin" "$phase_compare" "$unphase" "$fermi_lite" "$bam_error_model" "$phase_adjudicate"
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             ldd "$bin" || true
             ldd "$phase_compare" || true
             ldd "$unphase" || true
             ldd "$fermi_lite" || true
             ldd "$bam_error_model" || true
+            ldd "$phase_adjudicate" || true
           else
             otool -L "$bin"
             otool -L "$phase_compare"
             otool -L "$unphase"
             otool -L "$fermi_lite"
             otool -L "$bam_error_model"
+            otool -L "$phase_adjudicate"
           fi
 
       - name: Test Rust binary
@@ -103,6 +109,7 @@ jobs:
           ./tests/test_phase_compare.sh "${{ steps.rust-bin.outputs.phase_compare }}"
           ./tests/test_fermi_lite.sh "${{ steps.rust-bin.outputs.fermi_lite }}"
           ./tests/test_bam_error_model.sh "${{ steps.rust-bin.outputs.bam_error_model }}"
+          ./tests/test_phase_adjudicate.sh "${{ steps.rust-bin.outputs.phase_adjudicate }}"
           ./tests/test_negative.sh "${{ steps.rust-bin.outputs.path }}"
 
       - name: Check generated README is up to date
@@ -137,6 +144,7 @@ jobs:
           cp "${{ steps.rust-bin.outputs.unphase }}" "dist-ci/unphase_vcf-${suffix}"
           cp "${{ steps.rust-bin.outputs.fermi_lite }}" "dist-ci/fermi_lite_assemble-${suffix}"
           cp "${{ steps.rust-bin.outputs.bam_error_model }}" "dist-ci/bam_error_model-${suffix}"
+          cp "${{ steps.rust-bin.outputs.phase_adjudicate }}" "dist-ci/phase_adjudicate-${suffix}"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum dist-ci/* > "dist-ci/SHA256SUMS-${suffix}.txt"
           else

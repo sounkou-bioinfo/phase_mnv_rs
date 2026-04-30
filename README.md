@@ -11,7 +11,7 @@ on the same phased haplotype/phase set and emits normalized `TYPE=MNV` or
 | Default output | Derived MNV/COMPLEX records only (`--emit mnv`). |
 | Canonical implementation | Rust (`src/main.rs`), built on `rust-htslib`. |
 | Native dependencies | Vendored C libraries only when useful, exposed through generated/bindgen-backed FFI wrappers. |
-| Extra Rust modes | BCF/BGZF output, all-sites output, experimental BAM/CRAM phasing, codon-aware recomposition, native phase comparison, native VCF/BCF unphasing, empirical BAM error-model summaries, and experimental fermi-lite local assembly bindings. |
+| Extra Rust modes | BCF/BGZF output, all-sites output, experimental BAM/CRAM phasing, codon-aware recomposition, native phase comparison, native VCF/BCF unphasing, empirical BAM error-model summaries, initial read-evidence phase adjudication, and experimental fermi-lite local assembly bindings. |
 
 The Rust binary uses `rust-htslib` for VCF/BCF/BAM/CRAM APIs and only drops to
 `rust_htslib::htslib` where exact htslib behavior is needed. Rust-only features
@@ -37,7 +37,8 @@ Build or install variants:
 make install          # install Rust CLIs to ~/.local/bin
 make static-release   # static Linux Rust binary when supported
 make install-static   # install static Linux binary when supported
-# cargo also builds phase_compare, unphase_vcf, fermi_lite_assemble, and bam_error_model
+# cargo also builds phase_compare, unphase_vcf, fermi_lite_assemble,
+# bam_error_model, and phase_adjudicate
 ```
 
 Override the Rust target when needed:
@@ -286,6 +287,32 @@ options:
 -h, --help                Show this help
 ```
 
+### Experimental phase adjudication helper (`phase_adjudicate`)
+
+```text
+usage: phase_adjudicate --reference ref.fa --bam reads.bam --variants variants.vcf|bcf --pair-tsv pairs.tsv [options]
+
+Experimental read-evidence adjudicator for phase_compare pair TSV rows. The
+first implementation is deliberately narrow: it adjudicates biallelic SNV pairs
+by counting reads spanning both sites and comparing observed read allele parity
+with the truth/query phased GT patterns from the pair TSV. No MAPQ or baseQ
+filter is applied by default; optional thresholds are explicit.
+
+options:
+-r, --reference FILE       Required FASTA reference (used for CRAM decoding)
+--bam FILE             Indexed BAM/CRAM read evidence
+--variants FILE        VCF/BCF containing the pair sites and alleles
+--pair-tsv FILE        phase_compare --pair-tsv output
+-o, --output FILE          Output TSV (default: stdout)
+-@, --threads N            htslib reader threads (default: 1)
+--min-mapq N           Optional MAPQ cutoff (default: 0; no cutoff)
+--min-baseq N          Optional per-site baseQ cutoff (default: 0; no cutoff)
+--include-duplicates   Include duplicate reads
+--include-secondary    Include secondary alignments
+--include-supplementary Include supplementary alignments
+-h, --help                 Show this help
+```
+
 ## Examples
 
 These examples are executed when `README.md` is rendered from `README.Rmd`, so
@@ -515,8 +542,12 @@ should be interpreted as sequencing-error-plus-variation unless regions are
 restricted to homozygous-reference/high-confidence sites or the optional site
 guard is used.
 
-Neither helper is yet integrated into `phase_compare` or a final
-`phase_adjudicate` workflow.
+`phase_adjudicate` is an initial read-evidence helper for rows from
+`phase_compare --pair-tsv`. It currently supports biallelic SNV pairs, counts
+indexed BAM/CRAM reads spanning both sites, applies no MAPQ/baseQ filter by
+default, and emits a TSV winner/support/ambiguity summary. It is not yet a final
+assembly-aware adjudication workflow and does not consume `bam_error_model` or
+fermi-lite outputs directly.
 
 If you use fermi-lite-backed local assembly results, cite the FermiKit paper
 recommended by fermi-lite (Li 2015, Bioinformatics; doi:10.1093/bioinformatics/btv440).
