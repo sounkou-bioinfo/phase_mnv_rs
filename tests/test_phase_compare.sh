@@ -52,4 +52,27 @@ grep -qx $'chr1\t1\t3' "$tmp/switches.bed"
 [[ $(awk 'END {print NR + 0}' "$tmp/pairs.tsv") == 3 ]]
 grep -q $'chr1\t2\t3\t1\t1\t0\t1\tswitch' "$tmp/pairs.tsv"
 
+cat > "$tmp/hp_truth.vcf" <<'VCF'
+##fileformat=VCFv4.3
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chr1	1	.	A	G	.	PASS	.	GT:PS	0|1:1
+chr1	2	.	C	T	.	PASS	.	GT:PS	0|1:1
+VCF
+cat > "$tmp/hp_query.vcf" <<'VCF'
+##fileformat=VCFv4.3
+##contig=<ID=chr1>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=HP,Number=.,Type=String,Description="Phasing haplotype identifier">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chr1	1	.	A	G	.	PASS	.	GT:HP	0/1:1-2,1-1
+chr1	2	.	C	T	.	PASS	.	GT:HP	0/1:1-2,1-1
+VCF
+"$bin" --sample S1 "$tmp/hp_truth.vcf" "$tmp/hp_query.vcf" > "$tmp/hp.summary.tsv"
+awk -F'\t' '$1=="TOTAL" {
+  if ($11 != 2 || $12 != 1 || $13 != 2 || $14 != 1 || $15 != 1 || $16 != 0 || $17 != "0.000000") exit 1
+}' "$tmp/hp.summary.tsv"
+
 echo "phase_compare tests passed"

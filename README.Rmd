@@ -47,7 +47,7 @@ experimental unless a document explicitly says otherwise.
 | `phase_compare` | Native phase-concordance and switch-error summary for two VCF/BCF files. |
 | `unphase_vcf` | Convert phased VCF/BCF GT separators to unphased and optionally drop phase tags. |
 | `bam_error_model` | Summarize empirical mismatch/insertion/deletion patterns from BAM/CRAM vs FASTA. |
-| `phase_adjudicate` | Initial read-evidence adjudication for `phase_compare --pair-tsv` SNV pairs. |
+| `phase_adjudicate` | Initial read-evidence adjudication for `phase_compare --pair-tsv` SNV pairs, with optional assembly sidecars/fallback. |
 | `bam_contamination` | Experimental anchor-site contamination probe from BAM/CRAM plus TSV/VCF/BCF anchors. |
 | `bam_ancestry` | Experimental Summix-style ancestry mixture probe from BAM/CRAM plus population-AF anchors. |
 | `fermi_lite_assemble` | Small fermi-lite FFI smoke/utility binary for local assembly experiments. |
@@ -97,8 +97,16 @@ fence(run_cmd(
 
 `--phase-from-bam` performs experimental Rust read-backed phasing before MNV
 construction. The default `--phase-algorithm mec` solves an exact diploid
-single-sample MEC objective per connected component after deterministic read
-selection; use WhatsHap itself when established WhatsHap behavior is required.
+single-sample MEC objective per connected component after WhatsHap-style padded
+REF/ALT realignment, QNAME read-pair grouping, interval coverage capping,
+bridge-read rescue, and blank-aware active read state across unobserved
+intermediate variants. `--phase-max-coverage 15` is the default internal
+downsampling guard (aliases:
+`--phase-internal-downsampling`, `--internal-downsampling`). Compatible phasing
+flags include `--tag PS|HP`, `--only-snvs`, `--output-read-list`,
+`--mapping-quality`/`--mapq`, `--ignore-read-groups`, and
+`--use-supplementary`; use WhatsHap itself when established WhatsHap behavior is
+required.
 
 `bam_error_model` estimates error-plus-variation unless you restrict to trusted
 homozygous-reference sites or use its optional site guard:
@@ -179,5 +187,6 @@ license and is used as an optional local assembly substrate.
 - [`docs/cli.md`](docs/cli.md) — generated full CLI help.
 - [`docs/semantics.md`](docs/semantics.md) — variant, phasing, and helper semantics.
 - [`docs/validation.md`](docs/validation.md) — tracked validation strategy.
+- [`docs/roadmap.md`](docs/roadmap.md) — staged WhatsHap, local-assembly, and BAM-calling roadmap.
 - [`docs/contamination_and_ancestry.md`](docs/contamination_and_ancestry.md) — contamination/HLA/ancestry notes.
 - [`docs/nirvana_benchmark.md`](docs/nirvana_benchmark.md) — Nirvana-style codon benchmark notes.

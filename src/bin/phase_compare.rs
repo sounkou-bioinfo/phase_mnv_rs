@@ -100,7 +100,7 @@ struct BlockState {
 fn usage() -> &'static str {
     "usage: phase_compare [options] truth.vcf|bcf query.vcf|bcf\n\n\
 Fast phase-concordance comparison for two VCF/BCF files. The tool compares\n\
-exact shared variant records, diploid heterozygous GT phase, PS block\n\
+exact shared variant records, diploid heterozygous GT/HP phase, PS/HP block\n\
 intersections, pairwise phase matches, and switch errors. It does not perform\n\
 generic haplotype variant-call matching like hap.py.\n\n\
 options:\n\
@@ -302,6 +302,45 @@ fn get_sample_ps(record: &bcf::Record, sample_idx: usize) -> Option<i64> {
     }
 }
 
+fn parse_hp_entry(entry: &str) -> Option<(i64, usize)> {
+    let (block, hap) = entry.rsplit_once('-')?;
+    let block = block.parse::<i64>().ok()?;
+    let hap = hap.parse::<usize>().ok()?;
+    if hap == 0 || hap > 2 {
+        return None;
+    }
+    Some((block, hap - 1))
+}
+
+fn get_sample_hp_phase(
+    record: &bcf::Record,
+    sample_idx: usize,
+    gt_alleles: [i32; 2],
+) -> Option<(i64, [i32; 2])> {
+    let values = record.format(b"HP").string().ok()?;
+    let sample_value = values.get(sample_idx)?;
+    let hp = std::str::from_utf8(sample_value).ok()?;
+    if hp == "." || hp.is_empty() {
+        return None;
+    }
+    let entries = hp.split(',').collect::<Vec<_>>();
+    if entries.len() != 2 {
+        return None;
+    }
+    let (block0, hap0) = parse_hp_entry(entries[0])?;
+    let (block1, hap1) = parse_hp_entry(entries[1])?;
+    if block0 != block1 || hap0 == hap1 {
+        return None;
+    }
+    let mut phased = [i32::MIN; 2];
+    phased[hap0] = gt_alleles[0];
+    phased[hap1] = gt_alleles[1];
+    if phased.iter().any(|&a| a == i32::MIN) {
+        return None;
+    }
+    Some((block0, phased))
+}
+
 fn gt_string(alleles: [i32; 2], phased: bool) -> String {
     let sep = if phased { '|' } else { '/' };
     format!("{}{}{}", alleles[0], sep, alleles[1])
@@ -362,12 +401,24 @@ fn site_from_record(
     let Some(a1) = allele_index(gt[1]) else {
         return Ok(None);
     };
-    let phased = is_phased_after_first(gt[1]);
-    let het = a0 != a1;
-    let alleles = [a0, a1];
+    let gt_phased = is_phased_after_first(gt[1]);
+    let hp_phase = get_sample_hp_phase(record, sample_idx, [a0, a1]);
+    let mut alleles = [a0, a1];
+    if !gt_phased {
+        if let Some((_, hp_alleles)) = hp_phase {
+            alleles = hp_alleles;
+        }
+    }
+    let phased = gt_phased || hp_phase.is_some();
+    let het = alleles[0] != alleles[1];
     let selected_snv = selected_snv(&allele_strings, alleles);
     let gt = gt_string(alleles, phased);
-    let ps = get_sample_ps(record, sample_idx);
+    let mut ps = get_sample_ps(record, sample_idx);
+    if ps.is_none() {
+        if let Some((hp_ps, _)) = hp_phase {
+            ps = Some(hp_ps);
+        }
+    }
 
     Ok(Some(Site {
         key: VariantKey {

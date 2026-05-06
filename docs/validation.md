@@ -43,8 +43,9 @@ Behavior fixtures cover:
   mapchk-like high-nonref site guard, and per-read-position TSV coverage through
   `bam_error_model` on tracked BAM/SAM fixtures, with no MAPQ filter by default
 - experimental `phase_adjudicate` pair-level read-evidence coverage on tracked
-  VCF/BAM fixtures, including same-phase rows, switched truth/query parity, and
-  explicit baseQ filtering
+  VCF/BAM fixtures, including same-phase rows, switched truth/query parity,
+  explicit baseQ filtering, fermi-lite assembly FASTA/TSV sidecars, and guarded
+  `--use-assembly-decision` fallback behavior
 - experimental `bam_contamination` anchor-site contamination probe coverage on
   tracked BAM fixtures, including homozygous-alt reference infiltration,
   optional CHARR-like allele-frequency adjustment, explicit baseQ filtering, and
@@ -131,6 +132,29 @@ ALLOW_NONPERFECT=1 KEEP_TMP=1 make compare-whatshap-phase
 
 The script sanitizes generated VCF headers before comparison to remove command
 lines and local path-bearing records.
+
+## Local private replicate checks
+
+Larger non-committed checks are kept under ignored local output directories. One
+recent local check used a private 13-run WES replicate panel on chromosomes 1 and
+22. For each run, WhatsHap-phased VCFs were compared against Rust BAM-phased
+outputs with `phase_compare --only-snvs --pair-tsv`; switch rows were then sent
+to `phase_adjudicate` with `--assembly-fasta`, `--assembly-tsv`, and guarded
+`--use-assembly-decision`.
+
+Aggregate switched-pair adjudication results from that local run were:
+
+| chromosome | method | switch pairs | read-evidence decisions | assembly-rescued decisions | no-informative-read rows |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `rust_mec` | 118 | 101 | 7 | 9 |
+| 1 | `rust_greedy` | 102 | 88 | 6 | 7 |
+| 22 | `rust_mec` | 9 | 5 | 0 | 4 |
+| 22 | `rust_greedy` | 8 | 4 | 0 | 4 |
+
+Assembly fallback triggered only on chromosome 1 in this run: 13 total rescued
+ambiguous decisions, with 9 supporting the WhatsHap-oriented parity and 4
+supporting the Rust-oriented parity. These private validation artifacts are not
+tracked and are intended as tuning evidence, not as a public benchmark claim.
 
 ## Local/private data policy
 

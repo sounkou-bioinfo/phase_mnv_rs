@@ -1,7 +1,14 @@
+#[path = "../fermi_lite.rs"]
+mod fermi_lite;
+
+use fermi_lite::{assemble_reads, AssembleOptions, AssemblyRead};
+use libc::c_void;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, Read as BamRead};
 use rust_htslib::bcf::{self, Read as BcfRead};
+use rust_htslib::htslib;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
@@ -24,6 +31,13 @@ options:\n\
       --include-duplicates   Include duplicate reads\n\
       --include-secondary    Include secondary alignments\n\
       --include-supplementary Include supplementary alignments\n\
+      --assembly-fasta FILE  Experimental fermi-lite local assembly sidecar FASTA\n\
+      --assembly-tsv FILE    Experimental per-unitig assembly parity sidecar TSV\n\
+      --use-assembly-decision Use assembly evidence to break otherwise ambiguous decisions\n\
+      --assembly-window N    Bases of padding around each pair for assembly (default: 100)\n\
+      --assembly-context N   Bases around pair used for unitig parity scoring (default: 10)\n\
+      --assembly-max-reads N Maximum reads per pair assembly (default: 200)\n\
+      --assembly-min-asm-ovlp N fermi-lite minimum assembly overlap (default: 21)\n\
   -h, --help                 Show this help\n"
 }
 
@@ -40,6 +54,13 @@ struct Config {
     include_duplicates: bool,
     include_secondary: bool,
     include_supplementary: bool,
+    assembly_fasta: Option<String>,
+    assembly_tsv: Option<String>,
+    use_assembly_decision: bool,
+    assembly_window: i64,
+    assembly_context: i64,
+    assembly_max_reads: usize,
+    assembly_min_asm_overlap: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +78,33 @@ struct PairRecord {
 struct Variant {
     ref_base: u8,
     alt_base: u8,
+}
+
+#[derive(Debug, Default)]
+struct PairAssembly {
+    input_reads: usize,
+    unitigs: Vec<fermi_lite::Unitig>,
+}
+
+#[derive(Debug, Default)]
+struct AssemblyEvidence {
+    informative_unitigs: u64,
+    ambiguous_unitigs: u64,
+    truth_support: u64,
+    query_support: u64,
+    other_support: u64,
+}
+
+#[derive(Debug)]
+struct AssemblyCall {
+    start1: i64,
+    end1: i64,
+    best_prev_allele: Option<u8>,
+    best_allele: Option<u8>,
+    best_parity: Option<u8>,
+    best_distance: usize,
+    second_distance: Option<usize>,
+    status: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -96,6 +144,14 @@ impl PairEvidence {
     }
 }
 
+struct Fai(*mut htslib::faidx_t);
+
+impl Drop for Fai {
+    fn drop(&mut self) {
+        unsafe { htslib::fai_destroy(self.0) };
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
@@ -132,6 +188,13 @@ fn parse_args() -> Config {
     let mut include_duplicates = false;
     let mut include_secondary = false;
     let mut include_supplementary = false;
+    let mut assembly_fasta = None;
+    let mut assembly_tsv = None;
+    let mut use_assembly_decision = false;
+    let mut assembly_window = 100i64;
+    let mut assembly_context = 10i64;
+    let mut assembly_max_reads = 200usize;
+    let mut assembly_min_asm_overlap = 21i32;
     let mut positional = Vec::new();
 
     let mut i = 0usize;
@@ -201,6 +264,65 @@ fn parse_args() -> Config {
             "--include-duplicates" => include_duplicates = true,
             "--include-secondary" => include_secondary = true,
             "--include-supplementary" => include_supplementary = true,
+            "--assembly-fasta" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-fasta requires an argument");
+                }
+                assembly_fasta = Some(args[i].clone());
+            }
+            "--assembly-tsv" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-tsv requires an argument");
+                }
+                assembly_tsv = Some(args[i].clone());
+            }
+            "--use-assembly-decision" => use_assembly_decision = true,
+            "--assembly-window" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-window requires an argument");
+                }
+                assembly_window = parse_i64(&args[i], "--assembly-window");
+                if assembly_window < 0 {
+                    die("--assembly-window must be >= 0");
+                }
+            }
+            "--assembly-max-reads" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-max-reads requires an argument");
+                }
+                assembly_max_reads = args[i]
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| die("--assembly-max-reads must be an integer"));
+                if assembly_max_reads == 0 {
+                    die("--assembly-max-reads must be >= 1");
+                }
+            }
+            "--assembly-context" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-context requires an argument");
+                }
+                assembly_context = parse_i64(&args[i], "--assembly-context");
+                if assembly_context < 0 {
+                    die("--assembly-context must be >= 0");
+                }
+            }
+            "--assembly-min-asm-ovlp" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--assembly-min-asm-ovlp requires an argument");
+                }
+                assembly_min_asm_overlap = args[i]
+                    .parse::<i32>()
+                    .unwrap_or_else(|_| die("--assembly-min-asm-ovlp must be an integer"));
+                if assembly_min_asm_overlap < 1 {
+                    die("--assembly-min-asm-ovlp must be >= 1");
+                }
+            }
             x if x.starts_with('-') => die(&format!("unknown option: {x}")),
             _ => positional.push(args[i].clone()),
         }
@@ -209,6 +331,9 @@ fn parse_args() -> Config {
 
     if !positional.is_empty() {
         die("unexpected positional arguments; use --bam, --variants, and --pair-tsv");
+    }
+    if use_assembly_decision && assembly_tsv.is_none() {
+        die("--use-assembly-decision requires --assembly-tsv so assembly-supported decisions are auditable");
     }
 
     Config {
@@ -223,7 +348,57 @@ fn parse_args() -> Config {
         include_duplicates,
         include_secondary,
         include_supplementary,
+        assembly_fasta,
+        assembly_tsv,
+        use_assembly_decision,
+        assembly_window,
+        assembly_context,
+        assembly_max_reads,
+        assembly_min_asm_overlap,
     }
+}
+
+fn load_fai(path: &str) -> Result<Fai, String> {
+    let c_path = CString::new(path.as_bytes()).map_err(|_| "reference path contains NUL")?;
+    let fai = unsafe { htslib::fai_load(c_path.as_ptr()) };
+    if fai.is_null() {
+        Err(format!("cannot load FASTA index for '{path}'"))
+    } else {
+        Ok(Fai(fai))
+    }
+}
+
+fn fetch_ref_seq(fai: &Fai, chrom: &str, start1: i64, end1: i64) -> Result<Vec<u8>, String> {
+    if start1 < 1 || end1 < start1 {
+        return Err(format!("invalid FASTA interval {chrom}:{start1}-{end1}"));
+    }
+    let c_chrom = CString::new(chrom.as_bytes()).map_err(|_| "contig contains NUL")?;
+    let mut len: htslib::hts_pos_t = 0;
+    let ptr = unsafe {
+        htslib::faidx_fetch_seq64(
+            fai.0,
+            c_chrom.as_ptr(),
+            (start1 - 1) as htslib::hts_pos_t,
+            (end1 - 1) as htslib::hts_pos_t,
+            &mut len,
+        )
+    };
+    if ptr.is_null() || len <= 0 {
+        unsafe {
+            if !ptr.is_null() {
+                libc::free(ptr as *mut c_void);
+            }
+        }
+        return Err(format!(
+            "failed to fetch reference interval {chrom}:{start1}-{end1}"
+        ));
+    }
+    let seq = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }
+        .iter()
+        .map(|b| b.to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    unsafe { libc::free(ptr as *mut c_void) };
+    Ok(seq)
 }
 
 fn is_acgt(base: u8) -> bool {
@@ -405,6 +580,293 @@ fn base_at(record: &bam::Record, pos0: i64) -> Option<(u8, u8)> {
     None
 }
 
+fn record_sequence(record: &bam::Record) -> String {
+    let seq = record.seq();
+    (0..seq.len())
+        .map(|i| seq[i].to_ascii_uppercase() as char)
+        .collect()
+}
+
+fn assemble_pair(
+    bam: &mut bam::IndexedReader,
+    cfg: &Config,
+    pair: &PairRecord,
+) -> Result<PairAssembly, String> {
+    let start0 = (pair.prev_pos - 1 - cfg.assembly_window).max(0);
+    let end0 = pair.pos.max(pair.prev_pos) + cfg.assembly_window;
+    bam.fetch((pair.chrom.as_bytes(), start0, end0))
+        .map_err(|e| {
+            format!(
+                "failed to fetch assembly window {}:{}-{}: {e}",
+                pair.chrom,
+                start0 + 1,
+                end0
+            )
+        })?;
+
+    let mut reads = Vec::new();
+    for result in bam.records() {
+        let record = result.map_err(|e| format!("failed to read BAM/CRAM record: {e}"))?;
+        if !usable_record(&record, cfg) {
+            continue;
+        }
+        let seq = record_sequence(&record);
+        if !seq.is_empty() {
+            reads.push(AssemblyRead::sequence(seq));
+            if reads.len() >= cfg.assembly_max_reads {
+                break;
+            }
+        }
+    }
+
+    let mut options = AssembleOptions::default();
+    options.threads = cfg.threads as i32;
+    options.min_asm_overlap = cfg.assembly_min_asm_overlap;
+    let unitigs = assemble_reads(&reads, &options)?;
+    Ok(PairAssembly {
+        input_reads: reads.len(),
+        unitigs,
+    })
+}
+
+fn write_assembly_fasta(
+    pair: &PairRecord,
+    assembly: &PairAssembly,
+    writer: &mut Option<BufWriter<File>>,
+) -> Result<(), String> {
+    let Some(writer) = writer.as_mut() else {
+        return Ok(());
+    };
+    for (idx, unitig) in assembly.unitigs.iter().enumerate() {
+        writeln!(
+            writer,
+            ">{}:{}-{}|unitig={}|len={}|supporting_reads={}|input_reads={}\n{}",
+            pair.chrom,
+            pair.prev_pos,
+            pair.pos,
+            idx + 1,
+            unitig.len,
+            unitig.supporting_reads,
+            assembly.input_reads,
+            unitig.seq
+        )
+        .map_err(|e| format!("failed to write assembly FASTA: {e}"))?;
+    }
+    Ok(())
+}
+
+fn allele_base(variant: &Variant, allele: u8) -> u8 {
+    if allele == 0 {
+        variant.ref_base
+    } else {
+        variant.alt_base
+    }
+}
+
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|base| match base.to_ascii_uppercase() {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            _ => b'N',
+        })
+        .collect()
+}
+
+fn edit_distance(a: &[u8], b: &[u8]) -> usize {
+    let mut prev = (0..=b.len()).collect::<Vec<_>>();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let sub_cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + sub_cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+fn best_window_edit_distance(query: &[u8], haplotype: &[u8]) -> usize {
+    if query.is_empty() || haplotype.is_empty() {
+        return usize::MAX / 4;
+    }
+    if query.len() >= haplotype.len() {
+        query
+            .windows(haplotype.len())
+            .map(|window| edit_distance(window, haplotype))
+            .min()
+            .unwrap_or(usize::MAX / 4)
+    } else {
+        edit_distance(query, haplotype)
+    }
+}
+
+fn haplotype_for_pair(
+    fai: &Fai,
+    cfg: &Config,
+    pair: &PairRecord,
+    prev_variant: &Variant,
+    variant: &Variant,
+    prev_allele: u8,
+    allele: u8,
+) -> Result<(i64, i64, Vec<u8>), String> {
+    let left = pair.prev_pos.min(pair.pos);
+    let right = pair.prev_pos.max(pair.pos);
+    let start1 = (left - cfg.assembly_context).max(1);
+    let end1 = right + cfg.assembly_context;
+    let mut seq = fetch_ref_seq(fai, &pair.chrom, start1, end1)?;
+    let prev_offset = (pair.prev_pos - start1) as usize;
+    let offset = (pair.pos - start1) as usize;
+    if prev_offset >= seq.len() || offset >= seq.len() {
+        return Err(format!(
+            "reference interval {}:{}-{} does not cover pair {}-{}",
+            pair.chrom, start1, end1, pair.prev_pos, pair.pos
+        ));
+    }
+    seq[prev_offset] = allele_base(prev_variant, prev_allele);
+    seq[offset] = allele_base(variant, allele);
+    Ok((start1, end1, seq))
+}
+
+fn assembly_call_for_unitig(
+    fai: &Fai,
+    cfg: &Config,
+    pair: &PairRecord,
+    prev_variant: &Variant,
+    variant: &Variant,
+    unitig: &fermi_lite::Unitig,
+) -> Result<AssemblyCall, String> {
+    let unitig_seq = unitig.seq.as_bytes();
+    let unitig_rc = reverse_complement(unitig_seq);
+    let mut scored = Vec::<(usize, u8, u8)>::new();
+    let mut interval = None;
+    for prev_allele in 0..=1u8 {
+        for allele in 0..=1u8 {
+            let (start1, end1, haplotype) =
+                haplotype_for_pair(fai, cfg, pair, prev_variant, variant, prev_allele, allele)?;
+            interval = Some((start1, end1));
+            let forward = best_window_edit_distance(unitig_seq, &haplotype);
+            let reverse = best_window_edit_distance(&unitig_rc, &haplotype);
+            scored.push((forward.min(reverse), prev_allele, allele));
+        }
+    }
+    scored.sort_by_key(|(distance, prev_allele, allele)| (*distance, *prev_allele, *allele));
+    let (start1, end1) = interval.expect("four haplotypes were scored");
+    let best_distance = scored[0].0;
+    let second_distance = scored.get(1).map(|entry| entry.0);
+    let best = scored
+        .iter()
+        .filter(|(distance, _, _)| *distance == best_distance)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut best_parities = best
+        .iter()
+        .map(|(_, prev_allele, allele)| prev_allele ^ allele)
+        .collect::<Vec<_>>();
+    best_parities.sort_unstable();
+    best_parities.dedup();
+
+    let (best_prev_allele, best_allele) = if best.len() == 1 {
+        (Some(best[0].1), Some(best[0].2))
+    } else {
+        (None, None)
+    };
+    let best_parity = if best_parities.len() == 1 {
+        Some(best_parities[0])
+    } else {
+        None
+    };
+    let status = if best_parity.is_some() {
+        "informative"
+    } else {
+        "ambiguous"
+    };
+    Ok(AssemblyCall {
+        start1,
+        end1,
+        best_prev_allele,
+        best_allele,
+        best_parity,
+        best_distance,
+        second_distance,
+        status,
+    })
+}
+
+fn format_option_u8(value: Option<u8>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NA".to_string())
+}
+
+fn format_option_usize(value: Option<usize>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NA".to_string())
+}
+
+fn write_assembly_tsv(
+    fai: &Fai,
+    cfg: &Config,
+    pair: &PairRecord,
+    prev_variant: &Variant,
+    variant: &Variant,
+    truth_parity: u8,
+    query_parity: u8,
+    assembly: &PairAssembly,
+    writer: &mut Option<BufWriter<File>>,
+) -> Result<AssemblyEvidence, String> {
+    let mut evidence = AssemblyEvidence::default();
+    for (idx, unitig) in assembly.unitigs.iter().enumerate() {
+        let call = assembly_call_for_unitig(fai, cfg, pair, prev_variant, variant, unitig)?;
+        let supports_truth = call.best_parity == Some(truth_parity);
+        let supports_query = call.best_parity == Some(query_parity);
+        if call.best_parity.is_some() {
+            evidence.informative_unitigs += 1;
+            if supports_truth {
+                evidence.truth_support += 1;
+            }
+            if supports_query {
+                evidence.query_support += 1;
+            }
+            if !supports_truth && !supports_query {
+                evidence.other_support += 1;
+            }
+        } else {
+            evidence.ambiguous_unitigs += 1;
+        }
+        if let Some(writer) = writer.as_mut() {
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                pair.chrom,
+                pair.prev_pos,
+                pair.pos,
+                idx + 1,
+                assembly.input_reads,
+                unitig.len,
+                unitig.supporting_reads,
+                call.start1,
+                call.end1,
+                format_option_u8(call.best_prev_allele),
+                format_option_u8(call.best_allele),
+                format_option_u8(call.best_parity),
+                call.best_distance,
+                format_option_usize(call.second_distance),
+                call.status,
+                supports_truth,
+                supports_query
+            )
+            .map_err(|e| format!("failed to write assembly TSV: {e}"))?;
+        }
+    }
+    Ok(evidence)
+}
+
 fn allele_for_base(base: u8, variant: &Variant) -> Option<u8> {
     let base = base.to_ascii_uppercase();
     if base == variant.ref_base {
@@ -509,6 +971,25 @@ fn decision(
     }
 }
 
+fn assembly_decision(
+    evidence: &AssemblyEvidence,
+    truth_parity: u8,
+    query_parity: u8,
+) -> Option<(&'static str, bool, &'static str)> {
+    if truth_parity == query_parity || evidence.informative_unitigs == 0 {
+        return None;
+    }
+    if evidence.truth_support > evidence.query_support {
+        Some(("truth", false, "assembly_evidence"))
+    } else if evidence.query_support > evidence.truth_support {
+        Some(("query", false, "assembly_evidence"))
+    } else if evidence.truth_support > 0 {
+        Some(("tie", true, "assembly_equal_support"))
+    } else {
+        None
+    }
+}
+
 fn open_output(path: &Option<String>) -> Result<Box<dyn Write>, String> {
     if let Some(path) = path {
         let file = File::create(path).map_err(|e| format!("cannot create output '{path}': {e}"))?;
@@ -533,6 +1014,36 @@ fn run() -> Result<(), String> {
     }
 
     let mut out = open_output(&cfg.output)?;
+    let mut assembly_out = match cfg.assembly_fasta.as_deref() {
+        Some(path) => {
+            Some(BufWriter::new(File::create(path).map_err(|e| {
+                format!("cannot create assembly FASTA '{path}': {e}")
+            })?))
+        }
+        None => None,
+    };
+    let mut assembly_tsv = match cfg.assembly_tsv.as_deref() {
+        Some(path) => {
+            Some(BufWriter::new(File::create(path).map_err(|e| {
+                format!("cannot create assembly TSV '{path}': {e}")
+            })?))
+        }
+        None => None,
+    };
+    let score_assembly = cfg.assembly_tsv.is_some() || cfg.use_assembly_decision;
+    let fai = if score_assembly {
+        Some(load_fai(&cfg.reference)?)
+    } else {
+        None
+    };
+    if let Some(writer) = assembly_tsv.as_mut() {
+        writeln!(
+            writer,
+            "chrom\tprev_pos\tpos\tunitig\tinput_reads\tunitig_len\tsupporting_reads\tassembly_start\tassembly_end\tbest_prev_allele\tbest_allele\tbest_parity\tbest_distance\tsecond_distance\tstatus\tsupports_truth\tsupports_query"
+        )
+        .map_err(|e| format!("failed to write assembly TSV header: {e}"))?;
+    }
+    let write_assembly = assembly_out.is_some() || score_assembly;
     writeln!(
         out,
         "chrom\tprev_pos\tpos\ttruth_parity\tquery_parity\tusable_reads\tspanning_reads\tinformative_reads\ttruth_support\tquery_support\tother_support\tmean_min_baseq\tmean_mapq\tmapq_unknown_reads\tforward_reads\treverse_reads\twinner\tambiguous\treason"
@@ -589,7 +1100,33 @@ fn run() -> Result<(), String> {
             truth_parity,
             query_parity,
         )?;
-        let (winner, ambiguous, reason) = decision(&evidence, truth_parity, query_parity);
+        let mut assembly_evidence = AssemblyEvidence::default();
+        if write_assembly {
+            let assembly = assemble_pair(&mut bam, &cfg, pair)?;
+            write_assembly_fasta(pair, &assembly, &mut assembly_out)?;
+            if let Some(fai) = fai.as_ref() {
+                assembly_evidence = write_assembly_tsv(
+                    fai,
+                    &cfg,
+                    pair,
+                    prev_variant,
+                    variant,
+                    truth_parity,
+                    query_parity,
+                    &assembly,
+                    &mut assembly_tsv,
+                )?;
+            }
+        }
+        let (mut winner, mut ambiguous, mut reason) =
+            decision(&evidence, truth_parity, query_parity);
+        if cfg.use_assembly_decision && ambiguous {
+            if let Some(assembly_call) =
+                assembly_decision(&assembly_evidence, truth_parity, query_parity)
+            {
+                (winner, ambiguous, reason) = assembly_call;
+            }
+        }
         writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -617,6 +1154,16 @@ fn run() -> Result<(), String> {
     }
     out.flush()
         .map_err(|e| format!("failed to flush output: {e}"))?;
+    if let Some(writer) = assembly_out.as_mut() {
+        writer
+            .flush()
+            .map_err(|e| format!("failed to flush assembly FASTA: {e}"))?;
+    }
+    if let Some(writer) = assembly_tsv.as_mut() {
+        writer
+            .flush()
+            .map_err(|e| format!("failed to flush assembly TSV: {e}"))?;
+    }
     Ok(())
 }
 

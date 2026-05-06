@@ -1,12 +1,12 @@
 use libc::c_void;
-use rust_htslib::bam::record::Cigar;
+use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{self, Read as BamRead};
 use rust_htslib::bcf::header::HeaderView;
 use rust_htslib::bcf::record::GenotypeAllele;
 use rust_htslib::bcf::{self, Read as BcfRead};
 use rust_htslib::htslib;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -51,6 +51,12 @@ enum PhaseAlgorithm {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PhaseTag {
+    Ps,
+    Hp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MnvAlgorithm {
     Proximity,
     NirvanaCodon,
@@ -70,6 +76,15 @@ impl PhaseAlgorithm {
         match self {
             PhaseAlgorithm::Mec => "mec",
             PhaseAlgorithm::Greedy => "greedy",
+        }
+    }
+}
+
+impl PhaseTag {
+    fn as_str(self) -> &'static str {
+        match self {
+            PhaseTag::Ps => "PS",
+            PhaseTag::Hp => "HP",
         }
     }
 }
@@ -103,7 +118,14 @@ struct Config {
     phase_min_mapq: u8,
     phase_min_baseq: u8,
     phase_algorithm: PhaseAlgorithm,
+    phase_tag: PhaseTag,
     phase_max_coverage: usize,
+    phase_only_snvs: bool,
+    phase_use_supplementary: bool,
+    phase_ignore_read_groups: bool,
+    phase_supplementary_distance: i64,
+    phase_realign_overhang: i64,
+    phase_read_list_path: Option<String>,
     threads: usize,
     emit_mode: EmitMode,
     mnv_algorithm: MnvAlgorithm,
@@ -203,6 +225,8 @@ struct PhaseAssignment {
 struct ReadPhaseCall {
     calls: Vec<(usize, u8, u8)>,
     order: usize,
+    name: String,
+    mapq: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +239,8 @@ struct LocalReadCall {
 #[derive(Debug, Clone)]
 struct LocalRead {
     calls: Vec<LocalReadCall>,
+    first_var: usize,
+    last_var: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +260,7 @@ struct MecTraceState {
     cost: u64,
     prev_mask: Option<u64>,
     orientation: u8,
+    ambiguous: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -394,11 +421,29 @@ fn print_usage<W: Write>(mut out: W) -> io::Result<()> {
             "                        Experimental Rust read-backed phasing from indexed BAM/CRAM\n",
             "                        before MNV construction; input GT phase/PS is ignored\n",
             "      --phase-algorithm MODE\n",
-            "                        BAM phasing algorithm: mec or greedy (default: mec)\n",
+            "                        BAM phasing algorithm: mec or greedy (default: mec;\n",
+            "                        whatshap is an alias for mec)\n",
+            "      --tag TAG         Phasing tag for --emit all-sites and constructed output:\n",
+            "                        PS (default) or HP\n",
+            "      --only-snvs       Phase only biallelic SNV genotypes from BAM/CRAM\n",
+            "      --output-read-list FILE\n",
+            "                        Write selected BAM/CRAM reads used for MEC phasing\n",
+            "      --ignore-read-groups\n",
+            "                        Ignore BAM read-group sample names and use all reads\n",
+            "      --use-supplementary\n",
+            "                        Include supplementary alignments in BAM phasing\n",
+            "      --supplementary-distance N\n",
+            "                        Accepted for WhatsHap CLI compatibility; read grouping\n",
+            "                        is currently by QNAME regardless of this distance\n",
+            "      --phase-realign-overhang N\n",
+            "                        REF/ALT realignment overhang for BAM allele detection\n",
+            "                        (default: 10, matching WhatsHap reference mode)\n",
             "      --phase-max-coverage N\n",
-            "                        Maximum selected read coverage per variant for MEC phasing\n",
-            "                        (default: 15; WhatsHap-style downsampling guard)\n",
-            "      --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20)\n",
+            "                        Maximum selected read coverage per variant span for MEC\n",
+            "                        phasing (default: 15; alias: --phase-internal-downsampling;\n",
+            "                        inspired by WhatsHap --internal-downsampling)\n",
+            "      --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20;\n",
+            "                        aliases: --mapping-quality, --mapq)\n",
             "      --phase-min-baseq N Minimum base quality for --phase-from-bam (default: 13)\n",
             "      --warn-on-n        Warn when a selected REF/ALT allele contains N\n",
             "      --no-ref-check     Do not fail when VCF REF differs from FASTA\n",
@@ -421,8 +466,12 @@ fn print_usage<W: Write>(mut out: W) -> io::Result<()> {
             "    define the merge block.\n",
             "  * --phase-from-bam is a Rust-only experimental phaser inspired by\n",
             "    WhatsHap's read-backed phasing model. The default mec algorithm solves\n",
-            "    exact diploid single-sample MEC per connected component after deterministic\n",
-            "    read selection; greedy keeps the earlier pairwise parity heuristic.\n",
+            "    exact diploid single-sample MEC per connected component after WhatsHap-style\n",
+            "    QNAME read-pair grouping, deterministic read selection, interval coverage\n",
+            "    capping, bridge rescue, and blank-aware active-read DP; greedy keeps the\n",
+            "    earlier pairwise parity heuristic. Phase comparisons should use switch or\n",
+            "    pairwise phase metrics because a whole-block 0|1/1|0 orientation flip is\n",
+            "    equivalent.\n",
             "  * With the default --max-gap 0 and --mnv-algorithm proximity, only\n",
             "    adjacent phased variants are merged. Pure SNV blocks are TYPE=MNV;\n",
             "    blocks containing indels are TYPE=COMPLEX. nirvana-codon mode only\n",
@@ -468,7 +517,18 @@ fn parse_phase_algorithm(s: &str) -> PhaseAlgorithm {
     match s {
         "mec" | "whap" | "whatshap" => PhaseAlgorithm::Mec,
         "greedy" => PhaseAlgorithm::Greedy,
-        _ => die("--phase-algorithm must be one of: mec, greedy"),
+        "hapchat" | "heuristic" => die(
+            "--phase-algorithm hapchat/heuristic is not implemented; use mec/whatshap or greedy",
+        ),
+        _ => die("--phase-algorithm must be one of: mec, whatshap, greedy"),
+    }
+}
+
+fn parse_phase_tag(s: &str) -> PhaseTag {
+    match s {
+        "PS" | "ps" => PhaseTag::Ps,
+        "HP" | "hp" => PhaseTag::Hp,
+        _ => die("--tag must be one of: PS, HP"),
     }
 }
 
@@ -489,7 +549,14 @@ fn parse_args() -> Config {
     let mut phase_min_mapq = 20u8;
     let mut phase_min_baseq = 13u8;
     let mut phase_algorithm = PhaseAlgorithm::Mec;
+    let mut phase_tag = PhaseTag::Ps;
     let mut phase_max_coverage = 15usize;
+    let mut phase_only_snvs = false;
+    let mut phase_use_supplementary = false;
+    let mut phase_ignore_read_groups = false;
+    let mut phase_supplementary_distance = 100_000i64;
+    let mut phase_realign_overhang = 10i64;
+    let mut phase_read_list_path: Option<String> = None;
     let mut threads = 1usize;
     let mut emit_mode = EmitMode::Mnv;
     let mut mnv_algorithm = MnvAlgorithm::Proximity;
@@ -596,25 +663,91 @@ fn parse_args() -> Config {
                 }
                 phase_bam_path = Some(args[i].clone());
             }
-            "--phase-algorithm" => {
+            "--phase-algorithm" | "--algorithm" => {
                 i += 1;
                 if i >= args.len() {
                     die("--phase-algorithm requires an argument");
                 }
                 phase_algorithm = parse_phase_algorithm(&args[i]);
             }
-            "--phase-max-coverage" => {
+            "--tag" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--tag requires an argument");
+                }
+                phase_tag = parse_phase_tag(&args[i]);
+            }
+            "--only-snvs" => phase_only_snvs = true,
+            "--output-read-list" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--output-read-list requires an argument");
+                }
+                phase_read_list_path = Some(args[i].clone());
+            }
+            "--ignore-read-groups" => phase_ignore_read_groups = true,
+            "--use-supplementary" => phase_use_supplementary = true,
+            "--supplementary-distance" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--supplementary-distance requires an argument");
+                }
+                let value = parse_i64(&args[i], "--supplementary-distance");
+                if value < 0 {
+                    die("--supplementary-distance must be >= 0");
+                }
+                phase_supplementary_distance = value;
+            }
+            "--phase-realign-overhang" | "--overhang" => {
+                i += 1;
+                if i >= args.len() {
+                    die("--phase-realign-overhang requires an argument");
+                }
+                let value = parse_i64(&args[i], "--phase-realign-overhang");
+                if !(0..=1000).contains(&value) {
+                    die("--phase-realign-overhang must be between 0 and 1000");
+                }
+                phase_realign_overhang = value;
+            }
+            "--merge-reads" => die("--merge-reads is not implemented; phase_mnv_rs currently groups paired alignments by QNAME but does not implement WhatsHap ReadMerger"),
+            "--error-rate" | "--maximum-error-rate" | "--threshold" | "--negative-threshold" => {
+                i += 1;
+                if i >= args.len() {
+                    die(&format!("{} requires an argument", arg));
+                }
+                die("WhatsHap --merge-reads tuning options are not implemented")
+            }
+            "--ped" | "--genmap" | "--recombination-list" | "--changed-genotype-list" | "--default-gq" | "--gl-regularizer" | "--row-limit" | "--recombrate" => {
+                i += 1;
+                if i >= args.len() {
+                    die(&format!("{} requires an argument", arg));
+                }
+                die("pedigree/PedMEC, heuristic row-limit, and genotype-distrust options are not implemented")
+            }
+            "--distrust-genotypes" | "--include-homozygous" | "--no-genetic-haplotyping" | "--use-ped-samples" => {
+                die("pedigree/PedMEC and genotype-distrust options are not implemented")
+            }
+            "--chromosome" | "--exclude-chromosome" => {
+                i += 1;
+                if i >= args.len() {
+                    die(&format!("{} requires an argument", arg));
+                }
+                die("WhatsHap-style chromosome include/exclude filters are not implemented; subset the input VCF/BCF upstream")
+            }
+            "--phase-max-coverage"
+            | "--phase-internal-downsampling"
+            | "--internal-downsampling" => {
                 i += 1;
                 if i >= args.len() {
                     die("--phase-max-coverage requires an argument");
                 }
                 let value = parse_i64(&args[i], "--phase-max-coverage");
-                if !(1..=20).contains(&value) {
-                    die("--phase-max-coverage must be between 1 and 20");
+                if !(1..=23).contains(&value) {
+                    die("--phase-max-coverage must be between 1 and 23");
                 }
                 phase_max_coverage = value as usize;
             }
-            "--phase-min-mapq" => {
+            "--phase-min-mapq" | "--mapping-quality" | "--mapq" => {
                 i += 1;
                 if i >= args.len() {
                     die("--phase-min-mapq requires an argument");
@@ -638,6 +771,7 @@ fn parse_args() -> Config {
             }
             "--warn-on-n" | "--warm-on-n" => warn_on_n = true,
             "--no-ref-check" => no_ref_check = true,
+            "--no-reference" => die("--no-reference is not implemented; phase_mnv_rs requires --reference"),
             "--no-header" => no_header = true,
             "-q" | "--quiet" => quiet = true,
             _ if arg.starts_with('-') => {
@@ -676,7 +810,14 @@ fn parse_args() -> Config {
         phase_min_mapq,
         phase_min_baseq,
         phase_algorithm,
+        phase_tag,
         phase_max_coverage,
+        phase_only_snvs,
+        phase_use_supplementary,
+        phase_ignore_read_groups,
+        phase_supplementary_distance,
+        phase_realign_overhang,
+        phase_read_list_path,
         threads,
         emit_mode,
         mnv_algorithm,
@@ -724,7 +865,7 @@ fn unsupported_alt_kind(s: &[u8]) -> &'static str {
 
 fn phase_model_name(cfg: &Config) -> &'static str {
     match cfg.phase_algorithm {
-        PhaseAlgorithm::Mec => "experimental_diploid_mec_dp_read_selection",
+        PhaseAlgorithm::Mec => "experimental_diploid_mec_dp_whatshap_style_selection",
         PhaseAlgorithm::Greedy => "experimental_read_linkage_greedy_parity",
     }
 }
@@ -908,13 +1049,62 @@ fn preflight_vcf_header(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_read_usable_for_phasing(record: &bam::Record, min_mapq: u8) -> bool {
+fn is_read_usable_for_phasing(record: &bam::Record, cfg: &Config) -> bool {
     !record.is_unmapped()
         && !record.is_secondary()
-        && !record.is_supplementary()
+        && (cfg.phase_use_supplementary || !record.is_supplementary())
         && !record.is_duplicate()
         && !record.is_quality_check_failed()
-        && record.mapq() >= min_mapq
+        && record.mapq() >= cfg.phase_min_mapq
+}
+
+fn bam_read_group_sample_map(header: &bam::HeaderView) -> HashMap<String, String> {
+    let header = bam::Header::from_template(header);
+    let header_map = header.to_hashmap();
+    let mut rg_to_sample = HashMap::new();
+    if let Some(read_groups) = header_map.get("RG") {
+        for rg in read_groups {
+            if let (Some(id), Some(sample)) = (rg.get("ID"), rg.get("SM")) {
+                rg_to_sample.insert(id.clone(), sample.clone());
+            }
+        }
+    }
+    rg_to_sample
+}
+
+fn read_matches_requested_sample(
+    record: &bam::Record,
+    rg_to_sample: &HashMap<String, String>,
+    sample: &str,
+    ignore_read_groups: bool,
+) -> bool {
+    if ignore_read_groups || rg_to_sample.is_empty() {
+        return true;
+    }
+    match record.aux(b"RG") {
+        Ok(Aux::String(rg)) => rg_to_sample.get(rg).is_some_and(|sm| sm == sample),
+        _ => false,
+    }
+}
+
+fn merge_phase_call_lists(a: &mut Vec<(usize, u8, u8)>, b: &[(usize, u8, u8)]) {
+    for &(idx, allele, qual) in b {
+        match a
+            .iter_mut()
+            .find(|(existing_idx, _, _)| *existing_idx == idx)
+        {
+            Some((_, existing_allele, existing_qual)) => {
+                if *existing_allele == allele {
+                    *existing_qual = existing_qual.saturating_add(qual).min(60);
+                } else if qual > *existing_qual {
+                    *existing_allele = allele;
+                    *existing_qual = qual;
+                }
+            }
+            None => a.push((idx, allele, qual)),
+        }
+    }
+    a.sort_by_key(|&(idx, _, _)| idx);
 }
 
 fn read_events(record: &bam::Record) -> HashMap<i64, ReadEvent> {
@@ -979,6 +1169,160 @@ fn phase_quality(q: u8) -> u8 {
     }
 }
 
+fn reference_end0(record: &bam::Record) -> i64 {
+    let mut ref_pos = record.pos();
+    for cigar in record.cigar().iter() {
+        match *cigar {
+            Cigar::Match(len)
+            | Cigar::Equal(len)
+            | Cigar::Diff(len)
+            | Cigar::Del(len)
+            | Cigar::RefSkip(len) => ref_pos += i64::from(len),
+            Cigar::Ins(_) | Cigar::SoftClip(_) | Cigar::HardClip(_) | Cigar::Pad(_) => {}
+        }
+    }
+    ref_pos
+}
+
+fn query_seq_for_ref_window(
+    record: &bam::Record,
+    start0: i64,
+    end0: i64,
+    min_baseq: u8,
+) -> Option<(String, u8)> {
+    if start0 >= end0 {
+        return None;
+    }
+    let seq = record.seq();
+    let qual = record.qual();
+    let mut ref_pos = record.pos();
+    let mut read_pos = 0usize;
+    let mut last_ref_pos: Option<i64> = None;
+    let mut query = Vec::new();
+    let mut min_q = 255u8;
+    let mut overlapped = false;
+
+    for cigar in record.cigar().iter() {
+        match *cigar {
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                for _ in 0..len {
+                    if read_pos < seq.len() && start0 <= ref_pos && ref_pos < end0 {
+                        let q = qual.get(read_pos).copied().unwrap_or(255);
+                        if q < min_baseq {
+                            return None;
+                        }
+                        min_q = min_q.min(q);
+                        query.push(upbase(seq[read_pos]));
+                        overlapped = true;
+                    }
+                    last_ref_pos = Some(ref_pos);
+                    ref_pos += 1;
+                    read_pos += 1;
+                }
+            }
+            Cigar::Ins(len) => {
+                let keep = last_ref_pos.is_some_and(|anchor| start0 <= anchor && anchor < end0);
+                for _ in 0..len {
+                    if read_pos < seq.len() && keep {
+                        let q = qual.get(read_pos).copied().unwrap_or(255);
+                        if q < min_baseq {
+                            return None;
+                        }
+                        min_q = min_q.min(q);
+                        query.push(upbase(seq[read_pos]));
+                    }
+                    read_pos += 1;
+                }
+            }
+            Cigar::Del(len) | Cigar::RefSkip(len) => {
+                for _ in 0..len {
+                    if start0 <= ref_pos && ref_pos < end0 {
+                        overlapped = true;
+                    }
+                    last_ref_pos = Some(ref_pos);
+                    ref_pos += 1;
+                }
+            }
+            Cigar::SoftClip(len) => read_pos += len as usize,
+            Cigar::HardClip(_) | Cigar::Pad(_) => {}
+        }
+    }
+
+    if overlapped {
+        Some((
+            String::from_utf8_lossy(&query).into_owned(),
+            phase_quality(min_q).min(30),
+        ))
+    } else {
+        None
+    }
+}
+
+fn edit_distance(a: &[u8], b: &[u8]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ac) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &bc) in b.iter().enumerate() {
+            let cost = usize::from(ac.to_ascii_uppercase() != bc.to_ascii_uppercase());
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+fn realigned_read_allele_for_candidate(
+    record: &bam::Record,
+    fai: *mut htslib::faidx_t,
+    candidate: &PhaseCandidate,
+    min_baseq: u8,
+    overhang: i64,
+) -> Option<(String, u8)> {
+    let ref_len = candidate.alleles.first()?.len() as i64;
+    let var_start0 = candidate.pos - 1;
+    let var_end0 = var_start0 + ref_len;
+    let read_start0 = record.pos();
+    let read_end0 = reference_end0(record);
+    if read_start0 > var_start0 || read_end0 < var_end0 {
+        return None;
+    }
+    let win_start0 = read_start0.max(var_start0.saturating_sub(overhang));
+    let win_end0 = read_end0.min(var_end0.saturating_add(overhang));
+    if win_start0 > var_start0 || win_end0 < var_end0 || win_start0 >= win_end0 {
+        return None;
+    }
+
+    let ref_window = fetch_seq(fai, &candidate.chrom, win_start0 + 1, win_end0).ok()?;
+    let left_len = (var_start0 - win_start0) as usize;
+    let right_start = (var_end0 - win_start0) as usize;
+    let left_pad = &ref_window[..left_len];
+    let right_pad = &ref_window[right_start..];
+    let (query, qual) = query_seq_for_ref_window(record, win_start0, win_end0, min_baseq)?;
+
+    let allele_indices = candidate.input_order_alleles;
+    let mut distances = Vec::new();
+    for allele_index in allele_indices {
+        if allele_index < 0 || allele_index as usize >= candidate.alleles.len() {
+            return None;
+        }
+        let allele = format!(
+            "{}{}{}",
+            left_pad, candidate.alleles[allele_index as usize], right_pad
+        );
+        distances.push((
+            allele_index,
+            edit_distance(query.as_bytes(), allele.as_bytes()),
+        ));
+    }
+    distances.sort_by_key(|&(_, distance)| distance);
+    if distances.len() >= 2 && distances[0].1 < distances[1].1 {
+        Some((candidate.alleles[distances[0].0 as usize].clone(), qual))
+    } else {
+        None
+    }
+}
+
 fn read_allele_for_candidate(
     events: &HashMap<i64, ReadEvent>,
     candidate: &PhaseCandidate,
@@ -1020,7 +1364,9 @@ fn collect_read_phase_calls(
     record: &bam::Record,
     candidates: &[PhaseCandidate],
     candidates_by_pos0: &HashMap<i64, Vec<usize>>,
+    fai: *mut htslib::faidx_t,
     min_baseq: u8,
+    realign_overhang: i64,
 ) -> Vec<(usize, u8, u8)> {
     let events = read_events(record);
     if events.is_empty() {
@@ -1034,9 +1380,14 @@ fn collect_read_phase_calls(
         };
         for &idx in indices {
             let candidate = &candidates[idx];
-            let Some((read_allele, qual)) =
-                read_allele_for_candidate(&events, candidate, min_baseq)
-            else {
+            let Some((read_allele, qual)) = realigned_read_allele_for_candidate(
+                record,
+                fai,
+                candidate,
+                min_baseq,
+                realign_overhang,
+            )
+            .or_else(|| read_allele_for_candidate(&events, candidate, min_baseq)) else {
                 continue;
             };
             let allele0 = &candidate.alleles[candidate.input_order_alleles[0] as usize];
@@ -1057,6 +1408,7 @@ fn collect_read_phase_calls(
 fn collect_bam_phase_read_calls(
     cfg: &Config,
     candidates: &[PhaseCandidate],
+    sample: &str,
     st: &mut Stats,
 ) -> Result<Vec<ReadPhaseCall>, String> {
     let Some(bam_path) = cfg.phase_bam_path.as_deref() else {
@@ -1070,6 +1422,18 @@ fn collect_bam_phase_read_calls(
             .map_err(|e| format!("failed to enable BAM/CRAM threads for '{bam_path}': {e}"))?;
     }
 
+    let fasta = CString::new(cfg.fasta_path.as_bytes())
+        .map_err(|_| "FASTA path contains NUL".to_string())?;
+    let fai_ptr = unsafe { htslib::fai_load(fasta.as_ptr()) };
+    if fai_ptr.is_null() {
+        return Err(format!(
+            "cannot load or create FASTA index for '{}'",
+            cfg.fasta_path
+        ));
+    }
+    let fai = Faidx(fai_ptr);
+
+    let rg_to_sample = bam_read_group_sample_map(bam.header());
     let mut by_chrom: HashMap<&str, Vec<usize>> = HashMap::new();
     for (idx, candidate) in candidates.iter().enumerate() {
         by_chrom
@@ -1104,25 +1468,63 @@ fn collect_bam_phase_read_calls(
                 .push(idx);
         }
 
+        let mut grouped: HashMap<String, ReadPhaseCall> = HashMap::new();
+        let mut group_order = Vec::new();
         while let Some(result) = bam.read(&mut record) {
             result.map_err(|e| format!("failed to read BAM/CRAM record from '{bam_path}': {e}"))?;
-            if !is_read_usable_for_phasing(&record, cfg.phase_min_mapq) {
+            if !is_read_usable_for_phasing(&record, cfg) {
+                continue;
+            }
+            if !read_matches_requested_sample(
+                &record,
+                &rg_to_sample,
+                sample,
+                cfg.phase_ignore_read_groups,
+            ) {
                 continue;
             }
             let calls = collect_read_phase_calls(
                 &record,
                 candidates,
                 &candidates_by_pos0,
+                fai.0,
                 cfg.phase_min_baseq,
+                cfg.phase_realign_overhang,
             );
-            if calls.len() < 2 {
+            if calls.is_empty() {
                 continue;
             }
-            st.bam_phase_informative_reads += 1;
-            read_calls.push(ReadPhaseCall {
-                calls,
-                order: read_calls.len(),
-            });
+            let name = String::from_utf8_lossy(record.qname()).into_owned();
+            match grouped.get_mut(&name) {
+                Some(existing) => {
+                    merge_phase_call_lists(&mut existing.calls, &calls);
+                    existing.mapq = existing.mapq.max(record.mapq());
+                }
+                None => {
+                    let order = group_order.len();
+                    group_order.push(name.clone());
+                    grouped.insert(
+                        name.clone(),
+                        ReadPhaseCall {
+                            calls,
+                            order,
+                            name,
+                            mapq: record.mapq(),
+                        },
+                    );
+                }
+            }
+        }
+        for name in group_order {
+            if let Some(read) = grouped.remove(&name) {
+                if read.calls.len() >= 2 {
+                    st.bam_phase_informative_reads += 1;
+                    read_calls.push(ReadPhaseCall {
+                        order: read_calls.len(),
+                        ..read
+                    });
+                }
+            }
         }
     }
 
@@ -1217,47 +1619,331 @@ fn phase_candidates_greedy(
     assignments_from_dsu(candidates, dsu, st)
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ReadSelectionScore {
+    new_score: i64,
+    total_score: i64,
+    min_qual: u8,
+}
+
+impl Ord for ReadSelectionScore {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.new_score
+            .cmp(&other.new_score)
+            .then_with(|| self.total_score.cmp(&other.total_score))
+            .then_with(|| self.min_qual.cmp(&other.min_qual))
+    }
+}
+
+impl PartialOrd for ReadSelectionScore {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ReadSelectionHeapEntry {
+    score: ReadSelectionScore,
+    idx: usize,
+    order: usize,
+}
+
+impl Ord for ReadSelectionHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .cmp(&other.score)
+            .then_with(|| other.order.cmp(&self.order))
+            .then_with(|| other.idx.cmp(&self.idx))
+    }
+}
+
+impl PartialOrd for ReadSelectionHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn read_call_span(read: &ReadPhaseCall) -> Option<(usize, usize)> {
+    let mut begin = usize::MAX;
+    let mut end = 0usize;
+    for &(var, _, _) in &read.calls {
+        begin = begin.min(var);
+        end = end.max(var + 1);
+    }
+    if begin == usize::MAX {
+        None
+    } else {
+        Some((begin, end))
+    }
+}
+
+fn read_selection_score(read: &ReadPhaseCall, covered: &[bool]) -> ReadSelectionScore {
+    let Some((begin, end)) = read_call_span(read) else {
+        return ReadSelectionScore {
+            new_score: i64::MIN,
+            total_score: i64::MIN,
+            min_qual: 0,
+        };
+    };
+    let span_len = end.saturating_sub(begin);
+    let gaps = span_len.saturating_sub(read.calls.len());
+    let new_observed = read
+        .calls
+        .iter()
+        .filter(|&&(var, _, _)| var < covered.len() && !covered[var])
+        .count();
+    let min_qual = read.calls.iter().map(|&(_, _, q)| q).min().unwrap_or(0);
+    ReadSelectionScore {
+        new_score: new_observed as i64 - gaps as i64,
+        total_score: read.calls.len() as i64 - gaps as i64,
+        min_qual,
+    }
+}
+
+fn read_selection_entry(
+    read_calls: &[ReadPhaseCall],
+    idx: usize,
+    covered: &[bool],
+) -> ReadSelectionHeapEntry {
+    ReadSelectionHeapEntry {
+        score: read_selection_score(&read_calls[idx], covered),
+        idx,
+        order: read_calls[idx].order,
+    }
+}
+
+fn read_covers_new_observation(read: &ReadPhaseCall, covered: &[bool]) -> bool {
+    read.calls
+        .iter()
+        .any(|&(var, _, _)| var < covered.len() && !covered[var])
+}
+
+fn read_span_violates_coverage(
+    read: &ReadPhaseCall,
+    coverage: &[usize],
+    max_coverage: usize,
+) -> bool {
+    let Some((begin, end)) = read_call_span(read) else {
+        return true;
+    };
+    if end > coverage.len() {
+        return true;
+    }
+    coverage[begin..end].iter().any(|&cov| cov >= max_coverage)
+}
+
+fn add_read_span_coverage(read: &ReadPhaseCall, coverage: &mut [usize]) {
+    if let Some((begin, end)) = read_call_span(read) {
+        if end <= coverage.len() {
+            for cov in &mut coverage[begin..end] {
+                *cov += 1;
+            }
+        }
+    }
+}
+
+fn mark_read_observations_covered(read: &ReadPhaseCall, covered: &mut [bool]) {
+    for &(var, _, _) in &read.calls {
+        if var < covered.len() {
+            covered[var] = true;
+        }
+    }
+}
+
+fn union_read_variants(dsu: &mut Dsu, read: &ReadPhaseCall) {
+    let Some(&(first, _, _)) = read.calls.first() else {
+        return;
+    };
+    for &(var, _, _) in read.calls.iter().skip(1) {
+        let _ = dsu.union(first, var, 0);
+    }
+}
+
+fn read_component_count(dsu: &mut Dsu, read: &ReadPhaseCall) -> usize {
+    let mut roots = Vec::new();
+    for &(var, _, _) in &read.calls {
+        let (root, _) = dsu.find(var);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots.len()
+}
+
+fn select_read_slice(
+    read_calls: &[ReadPhaseCall],
+    variant_count: usize,
+    max_coverage: usize,
+    coverage: &mut [usize],
+    undecided: &mut [bool],
+) -> Vec<usize> {
+    let mut covered = vec![false; variant_count];
+    let mut heap = BinaryHeap::new();
+    for idx in 0..read_calls.len() {
+        if undecided[idx] {
+            heap.push(read_selection_entry(read_calls, idx, &covered));
+        }
+    }
+
+    let mut selected = Vec::new();
+    while let Some(entry) = heap.pop() {
+        if !undecided[entry.idx] {
+            continue;
+        }
+        let current = read_selection_entry(read_calls, entry.idx, &covered);
+        if current.score != entry.score {
+            heap.push(current);
+            continue;
+        }
+        if read_span_violates_coverage(&read_calls[entry.idx], coverage, max_coverage) {
+            undecided[entry.idx] = false;
+            continue;
+        }
+        if read_covers_new_observation(&read_calls[entry.idx], &covered) {
+            undecided[entry.idx] = false;
+            add_read_span_coverage(&read_calls[entry.idx], coverage);
+            mark_read_observations_covered(&read_calls[entry.idx], &mut covered);
+            selected.push(entry.idx);
+        }
+    }
+    selected
+}
+
+fn select_bridging_reads(
+    read_calls: &[ReadPhaseCall],
+    variant_count: usize,
+    max_coverage: usize,
+    coverage: &mut [usize],
+    undecided: &mut [bool],
+    reads_in_slice: &[usize],
+) -> Vec<usize> {
+    if reads_in_slice.is_empty() {
+        return Vec::new();
+    }
+
+    let mut dsu = Dsu::new(variant_count);
+    for &idx in reads_in_slice {
+        union_read_variants(&mut dsu, &read_calls[idx]);
+    }
+
+    let uncovered = vec![false; variant_count];
+    let mut order: Vec<usize> = (0..read_calls.len())
+        .filter(|&idx| undecided[idx])
+        .collect();
+    order.sort_by(|&a, &b| {
+        read_selection_score(&read_calls[b], &uncovered)
+            .cmp(&read_selection_score(&read_calls[a], &uncovered))
+            .then_with(|| read_calls[a].order.cmp(&read_calls[b].order))
+    });
+
+    let mut bridged = Vec::new();
+    for idx in order {
+        if !undecided[idx] {
+            continue;
+        }
+        if read_span_violates_coverage(&read_calls[idx], coverage, max_coverage) {
+            undecided[idx] = false;
+            continue;
+        }
+        if read_component_count(&mut dsu, &read_calls[idx]) < 2 {
+            continue;
+        }
+        undecided[idx] = false;
+        add_read_span_coverage(&read_calls[idx], coverage);
+        union_read_variants(&mut dsu, &read_calls[idx]);
+        bridged.push(idx);
+    }
+    bridged
+}
+
 fn select_read_calls_max_coverage(
     read_calls: &[ReadPhaseCall],
     variant_count: usize,
     max_coverage: usize,
 ) -> Vec<ReadPhaseCall> {
-    let mut order: Vec<usize> = (0..read_calls.len()).collect();
-    order.sort_by(|&a, &b| {
-        let qa: u64 = read_calls[a]
-            .calls
-            .iter()
-            .map(|&(_, _, q)| u64::from(q))
-            .sum();
-        let qb: u64 = read_calls[b]
-            .calls
-            .iter()
-            .map(|&(_, _, q)| u64::from(q))
-            .sum();
-        read_calls[b]
-            .calls
-            .len()
-            .cmp(&read_calls[a].calls.len())
-            .then_with(|| qb.cmp(&qa))
-            .then_with(|| read_calls[a].order.cmp(&read_calls[b].order))
-    });
-
     let mut coverage = vec![0usize; variant_count];
-    let mut selected = Vec::new();
-    for idx in order {
-        if read_calls[idx]
-            .calls
-            .iter()
-            .all(|&(var, _, _)| coverage[var] < max_coverage)
-        {
-            for &(var, _, _) in &read_calls[idx].calls {
-                coverage[var] += 1;
+    let mut undecided = vec![true; read_calls.len()];
+    let mut selected_flag = vec![false; read_calls.len()];
+    let mut selected_indices = Vec::new();
+
+    while undecided.iter().any(|&x| x) {
+        let undecided_before = undecided.iter().filter(|&&x| x).count();
+        let reads_in_slice = select_read_slice(
+            read_calls,
+            variant_count,
+            max_coverage,
+            &mut coverage,
+            &mut undecided,
+        );
+        for &idx in &reads_in_slice {
+            if !selected_flag[idx] {
+                selected_flag[idx] = true;
+                selected_indices.push(idx);
             }
-            selected.push(read_calls[idx].clone());
+        }
+
+        let bridging_reads = select_bridging_reads(
+            read_calls,
+            variant_count,
+            max_coverage,
+            &mut coverage,
+            &mut undecided,
+            &reads_in_slice,
+        );
+        for &idx in &bridging_reads {
+            if !selected_flag[idx] {
+                selected_flag[idx] = true;
+                selected_indices.push(idx);
+            }
+        }
+
+        let undecided_after = undecided.iter().filter(|&&x| x).count();
+        if undecided_after == undecided_before {
+            break;
         }
     }
-    selected.sort_by_key(|r| r.order);
-    selected
+
+    selected_indices.sort_by_key(|&idx| read_calls[idx].order);
+    selected_indices
+        .into_iter()
+        .map(|idx| read_calls[idx].clone())
+        .collect()
+}
+
+fn write_phase_read_list(path: &str, selected: &[ReadPhaseCall]) -> Result<(), String> {
+    let file = File::create(path).map_err(|e| format!("cannot create read list '{path}': {e}"))?;
+    let mut out = BufWriter::new(file);
+    writeln!(
+        out,
+        "#read_name\torder\tmapq\tn_calls\tfirst_variant_index\tlast_variant_index\tcalls"
+    )
+    .map_err(|e| format!("failed to write read list '{path}': {e}"))?;
+    for read in selected {
+        let Some((begin, end)) = read_call_span(read) else {
+            continue;
+        };
+        let calls = read
+            .calls
+            .iter()
+            .map(|(idx, allele, qual)| format!("{idx}:{allele}:{qual}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            read.name,
+            read.order,
+            read.mapq,
+            read.calls.len(),
+            begin,
+            end.saturating_sub(1),
+            calls
+        )
+        .map_err(|e| format!("failed to write read list '{path}': {e}"))?;
+    }
+    out.flush()
+        .map_err(|e| format!("failed to flush read list '{path}': {e}"))?;
+    Ok(())
 }
 
 fn project_mask(from_active: &[usize], to_pos: &HashMap<usize, usize>, from_mask: u64) -> u64 {
@@ -1276,9 +1962,8 @@ fn mec_column_cost(
     mask: u64,
     observations: &[(usize, u8, u8)],
     active_pos: &HashMap<usize, usize>,
-) -> (u64, u8) {
-    let mut best_cost = u64::MAX;
-    let mut best_orientation = 0u8;
+) -> (u64, u8, bool) {
+    let mut costs = [0u64; 2];
     for orientation in 0..=1u8 {
         let mut cost = 0u64;
         for &(read_id, allele, qual) in observations {
@@ -1288,12 +1973,13 @@ fn mec_column_cost(
                 cost += u64::from(qual);
             }
         }
-        if cost < best_cost {
-            best_cost = cost;
-            best_orientation = orientation;
-        }
+        costs[orientation as usize] = cost;
     }
-    (best_cost, best_orientation)
+    if costs[0] <= costs[1] {
+        (costs[0], 0, costs[0] == costs[1])
+    } else {
+        (costs[1], 1, false)
+    }
 }
 
 fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<usize, u8> {
@@ -1319,7 +2005,13 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
             continue;
         }
         calls.sort_by_key(|c| c.var);
-        local_reads.push(LocalRead { calls });
+        let first_var = calls.first().map(|c| c.var).unwrap_or(0);
+        let last_var = calls.last().map(|c| c.var).unwrap_or(first_var);
+        local_reads.push(LocalRead {
+            calls,
+            first_var,
+            last_var,
+        });
     }
 
     let mut by_var: Vec<Vec<(usize, u8, u8)>> = vec![Vec::new(); sorted_members.len()];
@@ -1330,13 +2022,21 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
     }
 
     let mut traces: Vec<MecTraceColumn> = Vec::new();
-    for observations in &by_var {
-        let mut active_reads = observations
+    for (var, observations) in by_var.iter().enumerate() {
+        let active_reads = local_reads
             .iter()
-            .map(|&(read_id, _, _)| read_id)
+            .enumerate()
+            .filter_map(|(read_id, read)| {
+                if read.first_var <= var && var <= read.last_var {
+                    Some(read_id)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-        active_reads.sort_unstable();
-        active_reads.dedup();
+        if active_reads.len() >= u64::BITS as usize {
+            return HashMap::new();
+        }
         let active_pos = active_reads
             .iter()
             .enumerate()
@@ -1375,25 +2075,29 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
                 let Some(&(prev_cost, prev_mask)) = prev_lookup.get(&key) else {
                     continue;
                 };
-                let (column_cost, orientation) = mec_column_cost(mask, observations, &active_pos);
+                let (column_cost, orientation, ambiguous) =
+                    mec_column_cost(mask, observations, &active_pos);
                 states.insert(
                     mask,
                     MecTraceState {
                         cost: prev_cost + column_cost,
                         prev_mask: Some(prev_mask),
                         orientation,
+                        ambiguous,
                     },
                 );
             }
         } else {
             for mask in 0..state_count {
-                let (column_cost, orientation) = mec_column_cost(mask, observations, &active_pos);
+                let (column_cost, orientation, ambiguous) =
+                    mec_column_cost(mask, observations, &active_pos);
                 states.insert(
                     mask,
                     MecTraceState {
                         cost: column_cost,
                         prev_mask: None,
                         orientation,
+                        ambiguous,
                     },
                 );
             }
@@ -1404,7 +2108,7 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
         });
     }
 
-    let mut rel_by_local = vec![0u8; sorted_members.len()];
+    let mut rel_by_local = vec![None; sorted_members.len()];
     let Some(last) = traces.last() else {
         return HashMap::new();
     };
@@ -1418,7 +2122,9 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
     let mut mask = mut_mask;
     for col in (0..traces.len()).rev() {
         let state = traces[col].states[&mask];
-        rel_by_local[col] = state.orientation;
+        if !state.ambiguous {
+            rel_by_local[col] = Some(state.orientation);
+        }
         if let Some(prev_mask) = state.prev_mask {
             mask = prev_mask;
         }
@@ -1427,7 +2133,7 @@ fn solve_mec_component(members: &[usize], reads: &[ReadPhaseCall]) -> HashMap<us
     sorted_members
         .into_iter()
         .enumerate()
-        .map(|(local, global)| (global, rel_by_local[local]))
+        .filter_map(|(local, global)| rel_by_local[local].map(|rel| (global, rel)))
         .collect()
 }
 
@@ -1436,10 +2142,13 @@ fn phase_candidates_mec(
     candidates: &[PhaseCandidate],
     read_calls: &[ReadPhaseCall],
     st: &mut Stats,
-) -> HashMap<usize, PhaseAssignment> {
+) -> Result<HashMap<usize, PhaseAssignment>, String> {
     let selected =
         select_read_calls_max_coverage(read_calls, candidates.len(), cfg.phase_max_coverage);
     st.bam_phase_selected_reads = selected.len() as u64;
+    if let Some(path) = cfg.phase_read_list_path.as_deref() {
+        write_phase_read_list(path, &selected)?;
+    }
 
     let mut dsu = Dsu::new(candidates.len());
     for read in &selected {
@@ -1486,21 +2195,27 @@ fn phase_candidates_mec(
             }
         }
     }
-    assignments
+    Ok(assignments)
 }
 
 fn phase_candidates_from_bam(
     cfg: &Config,
     candidates: &[PhaseCandidate],
+    sample: &str,
     st: &mut Stats,
 ) -> Result<HashMap<usize, PhaseAssignment>, String> {
     if cfg.phase_bam_path.is_none() || candidates.is_empty() {
         return Ok(HashMap::new());
     }
-    let read_calls = collect_bam_phase_read_calls(cfg, candidates, st)?;
+    let read_calls = collect_bam_phase_read_calls(cfg, candidates, sample, st)?;
     let assignments = match cfg.phase_algorithm {
-        PhaseAlgorithm::Mec => phase_candidates_mec(cfg, candidates, &read_calls, st),
-        PhaseAlgorithm::Greedy => phase_candidates_greedy(candidates, &read_calls, st),
+        PhaseAlgorithm::Mec => phase_candidates_mec(cfg, candidates, &read_calls, st)?,
+        PhaseAlgorithm::Greedy => {
+            if let Some(path) = cfg.phase_read_list_path.as_deref() {
+                write_phase_read_list(path, &read_calls)?;
+            }
+            phase_candidates_greedy(candidates, &read_calls, st)
+        }
     };
     st.bam_phase_phased_variants = assignments.len() as u64;
     st.bam_phase_unphased_variants = candidates.len().saturating_sub(assignments.len()) as u64;
@@ -1611,6 +2326,10 @@ fn candidate_from_record(
         .collect::<Vec<_>>();
     let ref_len = alleles[0].len() as i64;
     let is_snv = alleles[a0 as usize].len() == 1 && alleles[a1 as usize].len() == 1;
+    if cfg.phase_only_snvs && !is_snv {
+        st.skipped_unphased += 1;
+        return Ok(None);
+    }
     Ok(Some(PhaseCandidate {
         rid: record.rid().unwrap_or(0) as i32,
         chrom: chrom.to_string(),
@@ -1875,7 +2594,7 @@ fn read_observations_with_bam_phasing(
     }
 
     st.bam_phase_candidates = candidates.len() as u64;
-    let assignments = phase_candidates_from_bam(cfg, &candidates, &mut st)?;
+    let assignments = phase_candidates_from_bam(cfg, &candidates, &header_info.sample, &mut st)?;
 
     let mut obs = Vec::new();
     for (idx, candidate) in candidates.iter().enumerate() {
@@ -2448,6 +3167,27 @@ fn haps_for_mask(mask: i32) -> &'static str {
     }
 }
 
+fn hp_for_mask(mask: i32, ps: i64) -> String {
+    if ps == PS_MISSING {
+        return ".".to_string();
+    }
+    let ps_label = ps;
+    match mask & 3 {
+        1 => format!("{ps_label}-2,{ps_label}-1"),
+        2 => format!("{ps_label}-1,{ps_label}-2"),
+        3 => format!("{ps_label}-2,{ps_label}-2"),
+        _ => ".".to_string(),
+    }
+}
+
+fn hp_for_assignment(assignment: PhaseAssignment) -> String {
+    if assignment.rel == 0 {
+        format!("{}-1,{}-2", assignment.ps, assignment.ps)
+    } else {
+        format!("{}-2,{}-1", assignment.ps, assignment.ps)
+    }
+}
+
 fn push_output_header_records(h: &mut bcf::Header, cfg: &Config, header: &HeaderInfo) {
     h.push_record(b"##fileformat=VCFv4.3");
     h.push_record(b"##source=phase_mnv");
@@ -2462,6 +3202,7 @@ fn push_output_header_records(h: &mut bcf::Header, cfg: &Config, header: &Header
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         h.push_record(format!("##phase_mnv_phase_from_bam={bam_path}").as_bytes());
         h.push_record(format!("##phase_mnv_phase_model={}", phase_model_name(cfg)).as_bytes());
+        h.push_record(format!("##phase_mnv_phase_tag={}", cfg.phase_tag.as_str()).as_bytes());
     }
     h.push_record(format!("##reference={}", cfg.fasta_path).as_bytes());
     h.push_record(b"##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Merged call type: MNV for pure SNV blocks, COMPLEX when indels are included\">");
@@ -2472,7 +3213,10 @@ fn push_output_header_records(h: &mut bcf::Header, cfg: &Config, header: &Header
     h.push_record(b"##INFO=<ID=HAPS,Number=.,Type=Integer,Description=\"One-based phased haplotypes carrying this merged call\">");
     h.push_record(b"##INFO=<ID=PS,Number=1,Type=Integer,Description=\"Phase set shared by merged variants, when present in input FORMAT/PS\">");
     h.push_record(b"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Phased genotype for the constructed call in the selected sample\">");
-    h.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set for the constructed call, or missing if absent/ambiguous\">");
+    match cfg.phase_tag {
+        PhaseTag::Ps => h.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set for the constructed call, or missing if absent/ambiguous\">"),
+        PhaseTag::Hp => h.push_record(b"##FORMAT=<ID=HP,Number=.,Type=String,Description=\"Phasing haplotype identifier assigned by phase_mnv_rs\">"),
+    };
     for contig in &header.contigs {
         h.push_record(format!("##contig=<ID={contig}>").as_bytes());
     }
@@ -2505,6 +3249,7 @@ fn write_header<W: Write>(out: &mut W, cfg: &Config, header: &HeaderInfo) -> io:
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         writeln!(out, "##phase_mnv_phase_from_bam={bam_path}")?;
         writeln!(out, "##phase_mnv_phase_model={}", phase_model_name(cfg))?;
+        writeln!(out, "##phase_mnv_phase_tag={}", cfg.phase_tag.as_str())?;
     }
     writeln!(out, "##reference={}", cfg.fasta_path)?;
     writeln!(out, "##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Merged call type: MNV for pure SNV blocks, COMPLEX when indels are included\">")?;
@@ -2515,7 +3260,10 @@ fn write_header<W: Write>(out: &mut W, cfg: &Config, header: &HeaderInfo) -> io:
     writeln!(out, "##INFO=<ID=HAPS,Number=.,Type=Integer,Description=\"One-based phased haplotypes carrying this merged call\">")?;
     writeln!(out, "##INFO=<ID=PS,Number=1,Type=Integer,Description=\"Phase set shared by merged variants, when present in input FORMAT/PS\">")?;
     writeln!(out, "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Phased genotype for the constructed call in the selected sample\">")?;
-    writeln!(out, "##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set for the constructed call, or missing if absent/ambiguous\">")?;
+    match cfg.phase_tag {
+        PhaseTag::Ps => writeln!(out, "##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set for the constructed call, or missing if absent/ambiguous\">")?,
+        PhaseTag::Hp => writeln!(out, "##FORMAT=<ID=HP,Number=.,Type=String,Description=\"Phasing haplotype identifier assigned by phase_mnv_rs\">")?,
+    }
     for contig in &header.contigs {
         writeln!(out, "##contig=<ID={contig}>")?;
     }
@@ -2529,6 +3277,7 @@ fn write_header<W: Write>(out: &mut W, cfg: &Config, header: &HeaderInfo) -> io:
 
 fn write_calls<W: Write>(
     out: &mut W,
+    cfg: &Config,
     header: &HeaderInfo,
     calls: &[MnvCall],
     st: &mut Stats,
@@ -2558,12 +3307,20 @@ fn write_calls<W: Write>(
         if c.ps != PS_MISSING {
             write!(out, ";PS={}", c.ps)?;
         }
-        let ps = if c.ps == PS_MISSING {
-            ".".to_string()
-        } else {
-            c.ps.to_string()
-        };
-        writeln!(out, "\tGT:PS\t{}:{}", gt, ps)?;
+        match cfg.phase_tag {
+            PhaseTag::Ps => {
+                let ps = if c.ps == PS_MISSING {
+                    ".".to_string()
+                } else {
+                    c.ps.to_string()
+                };
+                writeln!(out, "\tGT:PS\t{}:{}", gt, ps)?;
+            }
+            PhaseTag::Hp => {
+                let hp = hp_for_mask(c.hap_mask, c.ps);
+                writeln!(out, "\tGT:HP\t{}:{}", gt, hp)?;
+            }
+        }
         st.emitted += 1;
     }
     Ok(())
@@ -2599,6 +3356,7 @@ fn genotype_for_mask(mask: i32) -> [GenotypeAllele; 2] {
 
 fn write_calls_bcf(
     writer: &mut bcf::Writer,
+    cfg: &Config,
     calls: &[MnvCall],
     st: &mut Stats,
 ) -> Result<(), String> {
@@ -2644,14 +3402,24 @@ fn write_calls_bcf(
         record
             .push_genotypes(&genotype_for_mask(c.hap_mask))
             .map_err(|e| format!("failed to set FORMAT/GT: {e}"))?;
-        let ps_value = if c.ps == PS_MISSING {
-            BCF_INT32_MISSING
-        } else {
-            c.ps as i32
-        };
-        record
-            .push_format_integer(b"PS", &[ps_value])
-            .map_err(|e| format!("failed to set FORMAT/PS: {e}"))?;
+        match cfg.phase_tag {
+            PhaseTag::Ps => {
+                let ps_value = if c.ps == PS_MISSING {
+                    BCF_INT32_MISSING
+                } else {
+                    c.ps as i32
+                };
+                record
+                    .push_format_integer(b"PS", &[ps_value])
+                    .map_err(|e| format!("failed to set FORMAT/PS: {e}"))?;
+            }
+            PhaseTag::Hp => {
+                let hp = hp_for_mask(c.hap_mask, c.ps);
+                record
+                    .push_format_string(b"HP", &[hp.as_bytes()])
+                    .map_err(|e| format!("failed to set FORMAT/HP: {e}"))?;
+            }
+        }
         writer
             .write(&record)
             .map_err(|e| format!("failed to write BCF record: {e}"))?;
@@ -2668,9 +3436,19 @@ fn push_all_sites_header_records(h: &mut bcf::Header, cfg: &Config, input_header
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         h.push_record(format!("##phase_mnv_phase_from_bam={bam_path}").as_bytes());
         h.push_record(format!("##phase_mnv_phase_model={}", phase_model_name(cfg)).as_bytes());
+        h.push_record(format!("##phase_mnv_phase_tag={}", cfg.phase_tag.as_str()).as_bytes());
     }
-    if input_header.format_type(b"PS").is_err() {
-        h.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set assigned by phase_mnv_rs\">");
+    match cfg.phase_tag {
+        PhaseTag::Ps => {
+            if input_header.format_type(b"PS").is_err() {
+                h.push_record(b"##FORMAT=<ID=PS,Number=1,Type=Integer,Description=\"Phase set assigned by phase_mnv_rs\">");
+            }
+        }
+        PhaseTag::Hp => {
+            if input_header.format_type(b"HP").is_err() {
+                h.push_record(b"##FORMAT=<ID=HP,Number=.,Type=String,Description=\"Phasing haplotype identifier assigned by phase_mnv_rs\">");
+            }
+        }
     }
 }
 
@@ -2714,6 +3492,7 @@ fn open_htslib_writer(cfg: &Config, header: &bcf::Header) -> Result<bcf::Writer,
 }
 
 fn update_record_phase(
+    cfg: &Config,
     record: &mut bcf::Record,
     candidate: &PhaseCandidate,
     assignment: PhaseAssignment,
@@ -2730,9 +3509,17 @@ fn update_record_phase(
     record
         .push_genotypes(&gt)
         .map_err(|e| format!("failed to update FORMAT/GT: {e}"))?;
-    record
-        .push_format_integer(b"PS", &[assignment.ps as i32])
-        .map_err(|e| format!("failed to update FORMAT/PS: {e}"))?;
+    match cfg.phase_tag {
+        PhaseTag::Ps => record
+            .push_format_integer(b"PS", &[assignment.ps as i32])
+            .map_err(|e| format!("failed to update FORMAT/PS: {e}"))?,
+        PhaseTag::Hp => {
+            let hp = hp_for_assignment(assignment);
+            record
+                .push_format_string(b"HP", &[hp.as_bytes()])
+                .map_err(|e| format!("failed to update FORMAT/HP: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -2801,7 +3588,8 @@ fn run_all_sites(cfg: &Config) -> Result<(), String> {
             }
         }
         st.bam_phase_candidates = candidates.len() as u64;
-        assignments_by_index = phase_candidates_from_bam(cfg, &candidates, &mut st)?;
+        assignments_by_index =
+            phase_candidates_from_bam(cfg, &candidates, &header_info.sample, &mut st)?;
     }
     drop(planning_reader);
 
@@ -2844,7 +3632,7 @@ fn run_all_sites(cfg: &Config) -> Result<(), String> {
         };
         writer.translate(&mut record);
         if let Some((candidate, assignment)) = maybe_assignment {
-            update_record_phase(&mut record, &candidate, assignment)?;
+            update_record_phase(cfg, &mut record, &candidate, assignment)?;
             st.phased_records += 1;
         }
         writer
@@ -2883,12 +3671,19 @@ fn print_summary(cfg: &Config, st: &Stats, sample: &str) {
     );
     if let Some(bam_path) = cfg.phase_bam_path.as_deref() {
         eprintln!(
-            "phase_mnv: bam_phase input={} algorithm={} max_coverage={} min_mapq={} min_baseq={} candidates={} informative_reads={} selected_reads={} components={} phased_variants={} unphased_variants={} conflicts={}",
+            "phase_mnv: bam_phase input={} algorithm={} tag={} max_coverage={} min_mapq={} min_baseq={} only_snvs={} use_supplementary={} ignore_read_groups={} supplementary_distance={} realign_overhang={} read_list={} candidates={} informative_reads={} selected_reads={} components={} phased_variants={} unphased_variants={} conflicts={}",
             bam_path,
             cfg.phase_algorithm.as_str(),
+            cfg.phase_tag.as_str(),
             cfg.phase_max_coverage,
             cfg.phase_min_mapq,
             cfg.phase_min_baseq,
+            cfg.phase_only_snvs,
+            cfg.phase_use_supplementary,
+            cfg.phase_ignore_read_groups,
+            cfg.phase_supplementary_distance,
+            cfg.phase_realign_overhang,
+            cfg.phase_read_list_path.as_deref().unwrap_or("."),
             st.bam_phase_candidates,
             st.bam_phase_informative_reads,
             st.bam_phase_selected_reads,
@@ -2954,7 +3749,7 @@ fn run() -> Result<(), String> {
             if !cfg.no_header {
                 write_header(&mut out, &cfg, &header).map_err(|e| e.to_string())?;
             }
-            write_calls(&mut out, &header, &calls, &mut st).map_err(|e| e.to_string())?;
+            write_calls(&mut out, &cfg, &header, &calls, &mut st).map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
         }
         (Some(path), OutputKind::PlainVcf) => {
@@ -2964,7 +3759,7 @@ fn run() -> Result<(), String> {
             if !cfg.no_header {
                 write_header(&mut out, &cfg, &header).map_err(|e| e.to_string())?;
             }
-            write_calls(&mut out, &header, &calls, &mut st).map_err(|e| e.to_string())?;
+            write_calls(&mut out, &cfg, &header, &calls, &mut st).map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
         }
         (Some(path), OutputKind::BgzfVcf) => {
@@ -2972,7 +3767,7 @@ fn run() -> Result<(), String> {
             if !cfg.no_header {
                 write_header(&mut out, &cfg, &header).map_err(|e| e.to_string())?;
             }
-            write_calls(&mut out, &header, &calls, &mut st).map_err(|e| e.to_string())?;
+            write_calls(&mut out, &cfg, &header, &calls, &mut st).map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
         }
         (Some(path), OutputKind::Bcf) => {
@@ -2984,7 +3779,7 @@ fn run() -> Result<(), String> {
                     .set_threads(cfg.threads)
                     .map_err(|e| format!("failed to enable BCF output threads: {e}"))?;
             }
-            write_calls_bcf(&mut writer, &calls, &mut st)?;
+            write_calls_bcf(&mut writer, &cfg, &calls, &mut st)?;
         }
         (None, OutputKind::BgzfVcf | OutputKind::Bcf) => {
             return Err(

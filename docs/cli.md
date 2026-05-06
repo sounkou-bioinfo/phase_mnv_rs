@@ -39,11 +39,29 @@ options:
                         Experimental Rust read-backed phasing from indexed BAM/CRAM
                         before MNV construction; input GT phase/PS is ignored
       --phase-algorithm MODE
-                        BAM phasing algorithm: mec or greedy (default: mec)
+                        BAM phasing algorithm: mec or greedy (default: mec;
+                        whatshap is an alias for mec)
+      --tag TAG         Phasing tag for --emit all-sites and constructed output:
+                        PS (default) or HP
+      --only-snvs       Phase only biallelic SNV genotypes from BAM/CRAM
+      --output-read-list FILE
+                        Write selected BAM/CRAM reads used for MEC phasing
+      --ignore-read-groups
+                        Ignore BAM read-group sample names and use all reads
+      --use-supplementary
+                        Include supplementary alignments in BAM phasing
+      --supplementary-distance N
+                        Accepted for WhatsHap CLI compatibility; read grouping
+                        is currently by QNAME regardless of this distance
+      --phase-realign-overhang N
+                        REF/ALT realignment overhang for BAM allele detection
+                        (default: 10, matching WhatsHap reference mode)
       --phase-max-coverage N
-                        Maximum selected read coverage per variant for MEC phasing
-                        (default: 15; WhatsHap-style downsampling guard)
-      --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20)
+                        Maximum selected read coverage per variant span for MEC
+                        phasing (default: 15; alias: --phase-internal-downsampling;
+                        inspired by WhatsHap --internal-downsampling)
+      --phase-min-mapq N  Minimum read MAPQ for --phase-from-bam (default: 20;
+                        aliases: --mapping-quality, --mapq)
       --phase-min-baseq N Minimum base quality for --phase-from-bam (default: 13)
       --warn-on-n        Warn when a selected REF/ALT allele contains N
       --no-ref-check     Do not fail when VCF REF differs from FASTA
@@ -66,8 +84,12 @@ Notes:
     define the merge block.
   * --phase-from-bam is a Rust-only experimental phaser inspired by
     WhatsHap's read-backed phasing model. The default mec algorithm solves
-    exact diploid single-sample MEC per connected component after deterministic
-    read selection; greedy keeps the earlier pairwise parity heuristic.
+    exact diploid single-sample MEC per connected component after WhatsHap-style
+    QNAME read-pair grouping, deterministic read selection, interval coverage
+    capping, bridge rescue, and blank-aware active-read DP; greedy keeps the
+    earlier pairwise parity heuristic. Phase comparisons should use switch or
+    pairwise phase metrics because a whole-block 0|1/1|0 orientation flip is
+    equivalent.
   * With the default --max-gap 0 and --mnv-algorithm proximity, only
     adjacent phased variants are merged. Pure SNV blocks are TYPE=MNV;
     blocks containing indels are TYPE=COMPLEX. nirvana-codon mode only
@@ -87,7 +109,7 @@ Notes:
 usage: phase_compare [options] truth.vcf|bcf query.vcf|bcf
 
 Fast phase-concordance comparison for two VCF/BCF files. The tool compares
-exact shared variant records, diploid heterozygous GT phase, PS block
+exact shared variant records, diploid heterozygous GT/HP phase, PS/HP block
 intersections, pairwise phase matches, and switch errors. It does not perform
 generic haplotype variant-call matching like hap.py.
 
@@ -204,6 +226,13 @@ options:
 --include-duplicates   Include duplicate reads
 --include-secondary    Include secondary alignments
 --include-supplementary Include supplementary alignments
+--assembly-fasta FILE  Experimental fermi-lite local assembly sidecar FASTA
+--assembly-tsv FILE    Experimental per-unitig assembly parity sidecar TSV
+--use-assembly-decision Use assembly evidence to break otherwise ambiguous decisions
+--assembly-window N    Bases of padding around each pair for assembly (default: 100)
+--assembly-context N   Bases around pair used for unitig parity scoring (default: 10)
+--assembly-max-reads N Maximum reads per pair assembly (default: 200)
+--assembly-min-asm-ovlp N fermi-lite minimum assembly overlap (default: 21)
 -h, --help                 Show this help
 ```
 

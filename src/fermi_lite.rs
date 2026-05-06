@@ -32,6 +32,7 @@ impl AssemblyRead {
         }
     }
 
+    #[allow(dead_code)]
     pub fn fastq<S: Into<String>, Q: Into<String>>(seq: S, qual: Q) -> Self {
         Self {
             seq: seq.into(),

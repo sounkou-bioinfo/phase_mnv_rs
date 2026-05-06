@@ -38,20 +38,42 @@ The default phasing algorithm is now:
 --phase-algorithm mec --phase-max-coverage 15
 ```
 
-This performs deterministic read selection to cap per-variant read coverage,
-builds read-connected components, and solves the exact weighted diploid
-single-sample MEC objective per component by dynamic programming over active-read
-bipartitions. The earlier pairwise parity heuristic remains available as:
+This performs WhatsHap-style reference-window allele detection with padded
+REF/ALT unit edit-distance realignment, QNAME read-pair grouping, and
+deterministic read selection to cap selected read coverage across each read's
+first-to-last variant span. It rescues bridge reads that connect otherwise
+separate selected-read components, builds read-connected components, and solves
+the exact weighted diploid single-sample MEC objective per component by dynamic
+programming over active-read bipartitions. Reads remain active across unobserved
+intermediate variants as blank entries: blanks add no allele cost, but they
+preserve the read's partition state across the gap. The earlier pairwise parity
+heuristic remains available as:
 
 ```bash
 --phase-algorithm greedy
 ```
 
+`--phase-max-coverage` is the Rust name for this internal downsampling guard;
+it defaults to 15 and also accepts the aliases `--phase-internal-downsampling`
+and `--internal-downsampling` for users familiar with WhatsHap. The accepted
+range is 1--23, matching WhatsHap's practical upper bound for exact core
+phasing. The realignment overhang defaults to 10 bases and is configurable with
+`--phase-realign-overhang` (`--overhang` alias). WhatsHap-compatible convenience
+flags include `--tag PS|HP`, `--only-snvs`, `--output-read-list`,
+`--mapping-quality`/`--mapq`, `--ignore-read-groups`, and `--use-supplementary`;
+unsupported pedigree,
+HapChat, heuristic, and genotype-distrust flags fail loudly rather than silently
+claiming compatibility.
+
 This mode is inspired by WhatsHap's non-pedigree read-backed phasing model, but
-it is still not a full WhatsHap clone: pedigree/PedMEC, all read-selection
-heuristics, all CLI options, and switch-error validated equivalence remain future
-work. The compatibility contract is currently the tracked Rust fixture and local
-validation against WhatsHap on real data, not byte identity with WhatsHap.
+it is still not a full WhatsHap clone: pedigree/PedMEC, full WhatsHap ReadMerger,
+HapChat, VCF phase-input superreads, genotype distrust/re-genotyping, and
+switch-error validated equivalence remain future work. Whole-block haplotype
+orientation flips such as `0|1,0|1` versus `1|0,1|0` are biologically equivalent;
+validation should therefore use `phase_compare` switch/pairwise phase metrics
+rather than raw haplotype-label identity. The compatibility contract is currently
+the tracked Rust fixture and local validation against WhatsHap on real data, not
+byte identity with WhatsHap.
 
 `bam_error_model` is a separate helper for learning empirical mismatch,
 insertion, and deletion summaries from BAM/CRAM reads against a FASTA reference.
@@ -79,8 +101,14 @@ same biallelic SNV sites. For each pair, it counts reads spanning both sites,
 derives observed allele parity, and compares that parity to the truth/query
 phased GT patterns in the pair TSV. MAPQ and baseQ are summarized and optional
 thresholds default to zero, so there is no default hard MAPQ/baseQ exclusion.
-The current scope is deliberately narrow: SNV pairs only, no local assembly, and
-no empirical-error weighting yet.
+The current scope is deliberately narrow: SNV pairs only and no empirical-error
+weighting yet. `--assembly-fasta FILE` is an experimental sidecar that assembles
+reads in a padded window around each pair with fermi-lite and writes unitigs to
+FASTA. `--assembly-tsv FILE` scores each unitig against the four local REF/ALT
+SNV-pair haplotypes with a simple edit-distance model and reports best parity
+support for inspection. `--use-assembly-decision` can use that unitig parity
+support to break otherwise ambiguous read-evidence decisions, but it requires
+`--assembly-tsv` so assembly-supported decisions remain auditable.
 
 `bam_contamination` is an experimental anchor-site contamination probe. It counts
 REF/ALT/other read bases at caller-provided biallelic anchors, summarizes raw

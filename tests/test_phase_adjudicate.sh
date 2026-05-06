@@ -25,6 +25,69 @@ grep -qx $'chr1\t1\t2\t0\t1\t4\t4\t4\t4\t0\t0\t40.000\t60.000\t0\t4\t0\ttruth\tf
 grep -qx $'chr1\t2\t4\t1\t0\t4\t4\t4\t4\t0\t0\t40.000\t60.000\t0\t4\t0\ttruth\tfalse\tevidence' "$tmp/out.tsv"
 grep -qx $'chr1\t4\t5\t0\t0\t4\t4\t4\t4\t4\t0\t40.000\t60.000\t0\t4\t0\tboth\tfalse\tsame_phase' "$tmp/out.tsv"
 
+case "$(uname -m)" in
+  x86_64|amd64)
+    python3 - <<'PY' > "$tmp/asm_ref.fa"
+ref = "ACGTGCTAGCTAGGATCCGATCGATGCTAGCTAGCATCGATCGTTAGCTAGGCTAACCGGTTAACCGGTTAGCATCGATCG"
+print(">chrA")
+print(ref)
+PY
+    samtools faidx "$tmp/asm_ref.fa"
+    python3 - <<'PY' > "$tmp/asm.sam"
+ref = "ACGTGCTAGCTAGGATCCGATCGATGCTAGCTAGCATCGATCGTTAGCTAGGCTAACCGGTTAACCGGTTAGCATCGATCG"
+hap = list(ref)
+hap[9] = "T"
+hap[24] = "A"
+hap = "".join(hap)
+print("@HD\tVN:1.6\tSO:coordinate")
+print(f"@SQ\tSN:chrA\tLN:{len(ref)}")
+for idx, start in enumerate([0, 8, 16, 24, 32, 40], 1):
+    seq = hap[start:start + 40]
+    print(f"asm{idx}\t0\tchrA\t{start + 1}\t60\t{len(seq)}M\t*\t0\t0\t{seq}\t" + "I" * len(seq))
+PY
+    samtools view -b "$tmp/asm.sam" | samtools sort -o "$tmp/asm.bam"
+    samtools index "$tmp/asm.bam"
+    cat > "$tmp/asm.vcf" <<'EOF'
+##fileformat=VCFv4.3
+##contig=<ID=chrA>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1
+chrA	10	.	C	T	.	PASS	.	GT	0/1
+chrA	25	.	T	A	.	PASS	.	GT	0/1
+EOF
+    cat > "$tmp/asm_pairs.tsv" <<'EOF'
+chrom	prev_pos	pos	prev_gt_truth	gt_truth	prev_gt_query	gt_query
+chrA	10	25	0|1	0|1	0|1	1|0
+EOF
+    "$bin" \
+      --reference "$tmp/asm_ref.fa" \
+      --bam "$tmp/asm.bam" \
+      --variants "$tmp/asm.vcf" \
+      --pair-tsv "$tmp/asm_pairs.tsv" \
+      --assembly-fasta "$tmp/assembly.fa" \
+      --assembly-tsv "$tmp/assembly.tsv" \
+      --assembly-window 30 \
+      --assembly-context 25 \
+      --assembly-min-asm-ovlp 12 > "$tmp/out.assembly.tsv"
+    grep -q '^>chrA:10-25|unitig=1' "$tmp/assembly.fa"
+    grep -qx $'chrom\tprev_pos\tpos\tunitig\tinput_reads\tunitig_len\tsupporting_reads\tassembly_start\tassembly_end\tbest_prev_allele\tbest_allele\tbest_parity\tbest_distance\tsecond_distance\tstatus\tsupports_truth\tsupports_query' "$tmp/assembly.tsv"
+    grep -Eq $'^chrA\t10\t25\t1\t6\t[0-9]+\t[0-9]+\t1\t50\t1\t1\t0\t0\t[0-9]+\tinformative\ttrue\tfalse$' "$tmp/assembly.tsv"
+    "$bin" \
+      --reference "$tmp/asm_ref.fa" \
+      --bam "$tmp/asm.bam" \
+      --variants "$tmp/asm.vcf" \
+      --pair-tsv "$tmp/asm_pairs.tsv" \
+      --min-baseq 41 \
+      --assembly-tsv "$tmp/assembly.decision.tsv" \
+      --use-assembly-decision \
+      --assembly-window 30 \
+      --assembly-context 25 \
+      --assembly-min-asm-ovlp 12 > "$tmp/out.assembly_decision.tsv"
+    grep -qx $'chrA\t10\t25\t0\t1\t4\t0\t0\t0\t0\t0\tNA\tNA\t0\t0\t0\ttruth\tfalse\tassembly_evidence' "$tmp/out.assembly_decision.tsv"
+    ;;
+  *) echo "phase_adjudicate assembly sidecar test skipped on non-x86_64 host" ;;
+esac
+
 "$bin" \
   --reference "$fixtures/ref.fa" \
   --bam "$fixtures/read_phase.bam" \
