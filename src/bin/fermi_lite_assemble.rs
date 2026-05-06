@@ -6,12 +6,12 @@ use std::io::{self, BufRead};
 
 fn usage() -> &'static str {
     "usage: fermi_lite_assemble [options] [--seq SEQ ...]\n\n\
-Small fermi-lite FFI smoke/utility binary. With --seq, assembles the supplied\n\
+fermi-lite FFI local assembly utility. With --seq, assembles the supplied\n\
 sequences. Without --seq, reads one plain sequence per non-empty stdin line,\n\
 ignoring FASTA-style header lines. With --fastq, reads FASTQ from stdin and\n\
 passes base qualities to fermi-lite's error-correction path when --ec-k >= 0.\n\
-This is intended for local adjudication experiments, not as a full fermi-lite\n\
-CLI replacement.\n\n\
+This is intended for assembly-backed local adjudication workflows, not as a full\n\
+fermi-lite CLI replacement.\n\n\
 options:\n\
       --seq SEQ              Add one input read/sequence\n\
       --fastq                Read FASTQ records from stdin instead of plain lines\n\

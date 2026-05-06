@@ -4,7 +4,7 @@ set -euo pipefail
 bin=${1:?usage: $0 <fermi_lite_assemble_binary>}
 case "$(uname -m)" in
   x86_64|amd64) ;;
-  *) echo "fermi-lite FFI smoke test skipped on non-x86_64 host"; exit 0 ;;
+  *) echo "fermi-lite FFI assembly test skipped on non-x86_64 host"; exit 0 ;;
 esac
 
 tmp=$(mktemp -d)
@@ -43,4 +43,4 @@ awk 'BEGIN{i=0} !/^>/ && NF {i++; print "@r" i "\n" $0 "\n+"; for (j=0; j<length
   < "$tmp/reads.fastq" > "$tmp/fastq.fa"
 grep -q '^>utg1 ' "$tmp/fastq.fa"
 
-echo "fermi-lite FFI smoke test passed"
+echo "fermi-lite FFI assembly test passed"

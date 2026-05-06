@@ -38,8 +38,8 @@ Behavior fixtures cover:
   BED-like codon-map fixture
 - native `phase_compare` switch-error, phase-match, and blockwise-Hamming stats
   on a tiny tracked truth/query fixture
-- bindgen-backed fermi-lite FFI smoke coverage through `fermi_lite_assemble`,
-  including FASTQ/base-quality passthrough
+- bindgen-backed fermi-lite FFI assembly coverage through
+  `fermi_lite_assemble`, including FASTQ/base-quality passthrough
 - empirical BAM error-model summary, exact-Q event composition TSV,
   mapchk-like high-nonref site guard, and per-read-position TSV coverage through
   `bam_error_model` on tracked BAM/SAM fixtures, with no MAPQ filter by default
@@ -171,4 +171,4 @@ REF=ref.fa VCF=input.vcf.gz BAM=reads.bam SAMPLE=S1 ALLOW_NONPERFECT=1 make comp
 
 Do not commit private paths, sample names, references, BAMs, or generated local
 outputs. Use ignored directories such as `local_runs/` or `resources/` for local
-experiments.
+validation runs.

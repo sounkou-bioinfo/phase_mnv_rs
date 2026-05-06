@@ -21,7 +21,7 @@ experimental unless a document explicitly says otherwise.
 | `phase_adjudicate` | Initial read-evidence adjudication for `phase_compare --pair-tsv` SNV pairs, with optional assembly sidecars/fallback. |
 | `bam_contamination` | Experimental anchor-site contamination probe from BAM/CRAM plus TSV/VCF/BCF anchors. |
 | `bam_ancestry` | Experimental Summix-style ancestry mixture probe from BAM/CRAM plus population-AF anchors. |
-| `fermi_lite_assemble` | Small fermi-lite FFI smoke/utility binary for local assembly experiments. |
+| `fermi_lite_assemble` | fermi-lite FFI local assembly utility for assembly-backed adjudication workflows. |
 
 Full generated CLI help lives in [`docs/cli.md`](docs/cli.md).
 
@@ -125,7 +125,7 @@ and cite the upstream methods relevant to your workflow:
 - MEC / weighted haplotype assembly ideas behind the experimental Rust BAM
   phaser: Patterson et al. 2015, *Journal of Computational Biology*,
   doi:[10.1089/cmb.2014.0157](https://doi.org/10.1089/cmb.2014.0157).
-- fermi-lite / FermiKit-backed local assembly experiments: Li 2015,
+- fermi-lite / FermiKit-backed local assembly workflows: Li 2015,
   *Bioinformatics*, doi:[10.1093/bioinformatics/btv440](https://doi.org/10.1093/bioinformatics/btv440).
 - CHARR-like contamination concepts: Lu et al. 2023, *American Journal of Human
   Genetics*, doi:[10.1016/j.ajhg.2023.10.011](https://doi.org/10.1016/j.ajhg.2023.10.011).

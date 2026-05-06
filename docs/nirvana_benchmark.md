@@ -19,7 +19,7 @@ The codon map is BED-like:
 CHROM START0 END0 TRANSCRIPT CODON_ID [ignored...]
 ```
 
-For local GRCh37 experiments, generate an ignored Ensembl GRCh37 codon map from
+For local GRCh37 validation runs, generate an ignored Ensembl GRCh37 codon map from
 GTF CDS features:
 
 ```bash

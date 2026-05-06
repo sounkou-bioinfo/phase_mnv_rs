@@ -159,12 +159,12 @@ options:
 ```text
 usage: fermi_lite_assemble [options] [--seq SEQ ...]
 
-Small fermi-lite FFI smoke/utility binary. With --seq, assembles the supplied
+fermi-lite FFI local assembly utility. With --seq, assembles the supplied
 sequences. Without --seq, reads one plain sequence per non-empty stdin line,
 ignoring FASTA-style header lines. With --fastq, reads FASTQ from stdin and
 passes base qualities to fermi-lite's error-correction path when --ec-k >= 0.
-This is intended for local adjudication experiments, not as a full fermi-lite
-CLI replacement.
+This is intended for assembly-backed local adjudication workflows, not as a full
+fermi-lite CLI replacement.
 
 options:
 --seq SEQ              Add one input read/sequence

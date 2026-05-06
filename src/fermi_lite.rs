@@ -58,7 +58,7 @@ impl Default for AssembleOptions {
             min_count: 1,
             max_count: 1000,
             // fermi-lite uses ec_k < 0 to skip error correction. This is more
-            // predictable for tiny local adjudication windows and smoke tests.
+            // predictable for tiny local adjudication windows and regression tests.
             // Use --ec-k 0 in the CLI to enable fermi-lite's auto EC path,
             // which can consume FASTQ/BAM base qualities when supplied.
             error_correction_k: -1,
