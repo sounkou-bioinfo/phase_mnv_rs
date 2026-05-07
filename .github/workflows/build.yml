@@ -34,6 +34,23 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install genomics CLIs used by regression tests (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bcftools samtools
+          bcftools --version | head -2
+          samtools --version | head -2
+
+      - name: Install genomics CLIs used by regression tests (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install bcftools samtools
+          bcftools --version | head -2
+          samtools --version | head -2
+
       - name: Check Rust formatting
         shell: bash
         run: cargo fmt --check

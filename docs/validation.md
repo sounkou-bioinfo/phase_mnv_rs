@@ -11,6 +11,11 @@ Run:
 make test
 ```
 
+CI installs `samtools` and `bcftools` before fixture tests so generated-BAM,
+compressed-output, and normalization regressions run in the hosted build. Local
+runs without those tools skip only the tool-dependent checks and still exercise
+tracked BAM/VCF fixtures.
+
 Behavior fixtures cover:
 
 - adjacent phased SNVs that become `TYPE=MNV`
