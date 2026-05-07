@@ -1,7 +1,8 @@
 # Validation notes
 
-This Rust-only repository validates `phase_tools-rs` binaries with explicit
-tracked fixtures. No private/local paths are embedded in tests or documentation.
+This Rust-only repository validates `phase_tools-rs` library-backed binaries
+with explicit tracked fixtures. No private/local paths are embedded in tests or
+documentation.
 
 ## Positive behavior fixtures
 

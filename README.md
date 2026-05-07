@@ -1,16 +1,18 @@
 # phase_tools-rs
 
-`phase_tools-rs` is a Rust genomics toolkit for phased VCF/BCF handling,
-read-backed phase evidence, BAM/CRAM empirical error summaries, and
+`phase_tools-rs` is a Rust library and CLI toolkit for phased VCF/BCF
+handling, read-backed phase evidence, BAM/CRAM empirical error summaries, and
 anchor-based contamination probes. The flagship binary, `phase_mnv_rs`, builds
 normalized phased haplotype MNV/COMPLEX records from variants on the same
 haplotype and phase set.
 
-The code uses `rust-htslib` for VCF/BCF/BAM/CRAM I/O. Rust-only phasing,
-adjudication, error-model, contamination, and fermi-lite assembly helpers are
-experimental unless a document explicitly says otherwise.
+The package exposes an internal `phase_tools` library crate. New functionality
+should land as reusable library modules first, with binaries acting as thin CLI
+frontends. The code uses `rust-htslib` for VCF/BCF/BAM/CRAM I/O. Rust-only
+phasing, adjudication, error-model, contamination, and fermi-lite assembly
+helpers are experimental unless a document explicitly says otherwise.
 
-## Tools
+## CLI frontends
 
 | Binary | Purpose |
 | --- | --- |
@@ -157,6 +159,7 @@ license and is used as an optional local assembly substrate.
 - [`docs/cli.md`](docs/cli.md) — generated full CLI help.
 - [`docs/semantics.md`](docs/semantics.md) — variant, phasing, and helper semantics.
 - [`docs/validation.md`](docs/validation.md) — tracked validation strategy.
+- [`docs/architecture.md`](docs/architecture.md) — library-first package architecture and refactor plan.
 - [`docs/roadmap.md`](docs/roadmap.md) — staged WhatsHap, local-assembly, and BAM-calling roadmap.
 - [`docs/contamination_and_ancestry.md`](docs/contamination_and_ancestry.md) — contamination/HLA/ancestry notes.
 - [`docs/nirvana_benchmark.md`](docs/nirvana_benchmark.md) — Nirvana-style codon benchmark notes.

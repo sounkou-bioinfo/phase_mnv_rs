@@ -3,11 +3,15 @@ name = "phase_tools-rs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Rust toolkit for phased variant handling, read evidence, BAM error modeling, and contamination probes"
+description = "Rust library and CLI toolkit for phased variants, read evidence, BAM error modeling, and contamination probes"
 repository = "https://github.com/sounkou-bioinfo/phase_tools-rs"
 homepage = "https://github.com/sounkou-bioinfo/phase_tools-rs"
 documentation = "https://github.com/sounkou-bioinfo/phase_tools-rs#readme"
 readme = "README.md"
+
+[lib]
+name = "phase_tools"
+path = "src/lib.rs"
 
 [[bin]]
 name = "phase_mnv_rs"

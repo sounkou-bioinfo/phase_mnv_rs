@@ -118,6 +118,8 @@ Validation gate:
 ## Engineering rules
 
 - Keep private data and paths under ignored `local_runs/`.
+- Implement reusable kernels in the `phase_tools` library crate before exposing
+  new binary-only workflows.
 - Prefer `rust-htslib` and existing vendored fermi-lite over new heavy
   dependencies.
 - Keep every claimed compatibility contract tied to commands, versions, and

@@ -1,8 +1,6 @@
-use libc::c_void;
+use phase_tools::io::fasta::Fai;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, Read as BamRead};
-use rust_htslib::htslib;
-use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
@@ -77,14 +75,6 @@ struct AnchorResult {
     predicted_alt_fraction: Option<f64>,
     residual: Option<f64>,
     used_for_fit: bool,
-}
-
-struct Fai(*mut htslib::faidx_t);
-
-impl Drop for Fai {
-    fn drop(&mut self) {
-        unsafe { htslib::fai_destroy(self.0) };
-    }
 }
 
 fn die(msg: &str) -> ! {
@@ -246,44 +236,6 @@ fn parse_args() -> Config {
     }
 }
 
-fn load_fai(path: &str) -> Result<Fai, String> {
-    let c_path = CString::new(path.as_bytes()).map_err(|_| "reference path contains NUL")?;
-    let fai = unsafe { htslib::fai_load(c_path.as_ptr()) };
-    if fai.is_null() {
-        Err(format!("cannot load FASTA index for '{path}'"))
-    } else {
-        Ok(Fai(fai))
-    }
-}
-
-fn fetch_ref_base(fai: &Fai, chrom: &str, pos1: i64) -> Result<u8, String> {
-    if pos1 < 1 {
-        return Err(format!("invalid FASTA position {chrom}:{pos1}"));
-    }
-    let c_chrom = CString::new(chrom.as_bytes()).map_err(|_| "contig contains NUL")?;
-    let mut len: htslib::hts_pos_t = 0;
-    let ptr = unsafe {
-        htslib::faidx_fetch_seq64(
-            fai.0,
-            c_chrom.as_ptr(),
-            (pos1 - 1) as htslib::hts_pos_t,
-            (pos1 - 1) as htslib::hts_pos_t,
-            &mut len,
-        )
-    };
-    if ptr.is_null() || len != 1 {
-        unsafe {
-            if !ptr.is_null() {
-                libc::free(ptr as *mut c_void);
-            }
-        }
-        return Err(format!("failed to fetch reference base {chrom}:{pos1}"));
-    }
-    let base = unsafe { *(ptr as *const u8) }.to_ascii_uppercase();
-    unsafe { libc::free(ptr as *mut c_void) };
-    Ok(base)
-}
-
 fn is_acgt(base: u8) -> bool {
     matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
 }
@@ -424,7 +376,7 @@ fn read_anchors(
 
 fn validate_anchor_reference(anchors: &[Anchor], fai: &Fai) -> Result<(), String> {
     for anchor in anchors {
-        let fasta_base = fetch_ref_base(fai, &anchor.chrom, anchor.pos)?;
+        let fasta_base = fai.fetch_base(&anchor.chrom, anchor.pos)?;
         if !is_acgt(fasta_base) {
             return Err(format!(
                 "reference FASTA base at {}:{} is not A/C/G/T",
@@ -623,7 +575,7 @@ fn open_output(path: &Option<String>) -> Result<Box<dyn Write>, String> {
 fn run() -> Result<(), String> {
     let cfg = parse_args();
     let (populations, anchors) = read_anchors(&cfg.anchors, &cfg.populations)?;
-    let fai = load_fai(&cfg.reference)?;
+    let fai = Fai::from_path(&cfg.reference)?;
     validate_anchor_reference(&anchors, &fai)?;
 
     let mut bam = bam::IndexedReader::from_path(&cfg.bam)

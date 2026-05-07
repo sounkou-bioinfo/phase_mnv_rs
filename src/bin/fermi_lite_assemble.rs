@@ -1,7 +1,4 @@
-#[path = "../fermi_lite.rs"]
-mod fermi_lite;
-
-use fermi_lite::{assemble_reads, AssembleOptions, AssemblyRead};
+use phase_tools::assembly::fermi_lite::{assemble_reads, AssembleOptions, AssemblyRead};
 use std::io::{self, BufRead};
 
 fn usage() -> &'static str {

@@ -1,14 +1,9 @@
-#[path = "../fermi_lite.rs"]
-mod fermi_lite;
-
-use fermi_lite::{assemble_reads, AssembleOptions, AssemblyRead};
-use libc::c_void;
+use phase_tools::assembly::fermi_lite::{assemble_reads, AssembleOptions, AssemblyRead, Unitig};
+use phase_tools::io::fasta::Fai;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, Read as BamRead};
 use rust_htslib::bcf::{self, Read as BcfRead};
-use rust_htslib::htslib;
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
@@ -83,7 +78,7 @@ struct Variant {
 #[derive(Debug, Default)]
 struct PairAssembly {
     input_reads: usize,
-    unitigs: Vec<fermi_lite::Unitig>,
+    unitigs: Vec<Unitig>,
 }
 
 #[derive(Debug, Default)]
@@ -141,14 +136,6 @@ impl PairEvidence {
         } else {
             format!("{:.3}", self.sum_mapq as f64 / self.mapq_known_reads as f64)
         }
-    }
-}
-
-struct Fai(*mut htslib::faidx_t);
-
-impl Drop for Fai {
-    fn drop(&mut self) {
-        unsafe { htslib::fai_destroy(self.0) };
     }
 }
 
@@ -356,49 +343,6 @@ fn parse_args() -> Config {
         assembly_max_reads,
         assembly_min_asm_overlap,
     }
-}
-
-fn load_fai(path: &str) -> Result<Fai, String> {
-    let c_path = CString::new(path.as_bytes()).map_err(|_| "reference path contains NUL")?;
-    let fai = unsafe { htslib::fai_load(c_path.as_ptr()) };
-    if fai.is_null() {
-        Err(format!("cannot load FASTA index for '{path}'"))
-    } else {
-        Ok(Fai(fai))
-    }
-}
-
-fn fetch_ref_seq(fai: &Fai, chrom: &str, start1: i64, end1: i64) -> Result<Vec<u8>, String> {
-    if start1 < 1 || end1 < start1 {
-        return Err(format!("invalid FASTA interval {chrom}:{start1}-{end1}"));
-    }
-    let c_chrom = CString::new(chrom.as_bytes()).map_err(|_| "contig contains NUL")?;
-    let mut len: htslib::hts_pos_t = 0;
-    let ptr = unsafe {
-        htslib::faidx_fetch_seq64(
-            fai.0,
-            c_chrom.as_ptr(),
-            (start1 - 1) as htslib::hts_pos_t,
-            (end1 - 1) as htslib::hts_pos_t,
-            &mut len,
-        )
-    };
-    if ptr.is_null() || len <= 0 {
-        unsafe {
-            if !ptr.is_null() {
-                libc::free(ptr as *mut c_void);
-            }
-        }
-        return Err(format!(
-            "failed to fetch reference interval {chrom}:{start1}-{end1}"
-        ));
-    }
-    let seq = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }
-        .iter()
-        .map(|b| b.to_ascii_uppercase())
-        .collect::<Vec<_>>();
-    unsafe { libc::free(ptr as *mut c_void) };
-    Ok(seq)
 }
 
 fn is_acgt(base: u8) -> bool {
@@ -718,7 +662,7 @@ fn haplotype_for_pair(
     let right = pair.prev_pos.max(pair.pos);
     let start1 = (left - cfg.assembly_context).max(1);
     let end1 = right + cfg.assembly_context;
-    let mut seq = fetch_ref_seq(fai, &pair.chrom, start1, end1)?;
+    let mut seq = fai.fetch_seq(&pair.chrom, start1, end1)?;
     let prev_offset = (pair.prev_pos - start1) as usize;
     let offset = (pair.pos - start1) as usize;
     if prev_offset >= seq.len() || offset >= seq.len() {
@@ -738,7 +682,7 @@ fn assembly_call_for_unitig(
     pair: &PairRecord,
     prev_variant: &Variant,
     variant: &Variant,
-    unitig: &fermi_lite::Unitig,
+    unitig: &Unitig,
 ) -> Result<AssemblyCall, String> {
     let unitig_seq = unitig.seq.as_bytes();
     let unitig_rc = reverse_complement(unitig_seq);
@@ -1032,7 +976,7 @@ fn run() -> Result<(), String> {
     };
     let score_assembly = cfg.assembly_tsv.is_some() || cfg.use_assembly_decision;
     let fai = if score_assembly {
-        Some(load_fai(&cfg.reference)?)
+        Some(Fai::from_path(&cfg.reference)?)
     } else {
         None
     };
