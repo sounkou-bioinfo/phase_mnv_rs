@@ -1,9 +1,7 @@
-use libc::c_void;
+use phase_tools::io::fasta::Fai;
 use rust_htslib::bam::record::Cigar;
 use rust_htslib::bam::{self, Read};
-use rust_htslib::htslib;
 use std::collections::BTreeMap;
-use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -134,14 +132,6 @@ impl SiteFilter {
 
 fn site_allowed(site_filter: Option<&SiteFilter>, chrom: &str, pos0: i64) -> bool {
     !site_filter.is_some_and(|filter| filter.is_skipped(chrom, pos0))
-}
-
-struct Fai(*mut htslib::faidx_t);
-
-impl Drop for Fai {
-    fn drop(&mut self) {
-        unsafe { htslib::fai_destroy(self.0) };
-    }
 }
 
 fn die(msg: &str) -> ! {
@@ -361,50 +351,20 @@ fn parse_args() -> Config {
     }
 }
 
-fn load_fai(path: &str) -> Result<Fai, String> {
-    let c_path = CString::new(path.as_bytes()).map_err(|_| "reference path contains NUL")?;
-    let fai = unsafe { htslib::fai_load(c_path.as_ptr()) };
-    if fai.is_null() {
-        Err(format!("cannot load FASTA index for '{path}'"))
-    } else {
-        Ok(Fai(fai))
-    }
-}
-
 fn fetch_ref(fai: &Fai, chrom: &str, start0: i64, end0: i64) -> Result<Vec<u8>, String> {
     if end0 <= start0 {
         return Ok(Vec::new());
     }
-    let c_chrom = CString::new(chrom.as_bytes()).map_err(|_| "contig contains NUL")?;
-    let mut len: htslib::hts_pos_t = 0;
-    let ptr = unsafe {
-        htslib::faidx_fetch_seq64(
-            fai.0,
-            c_chrom.as_ptr(),
-            start0 as htslib::hts_pos_t,
-            (end0 - 1) as htslib::hts_pos_t,
-            &mut len,
-        )
-    };
-    let expected = end0 - start0;
-    if ptr.is_null() || len != expected as htslib::hts_pos_t {
-        unsafe {
-            if !ptr.is_null() {
-                libc::free(ptr as *mut c_void);
-            }
-        }
+    let out = fai.fetch_seq(chrom, start0 + 1, end0)?;
+    let expected = (end0 - start0) as usize;
+    if out.len() != expected {
         return Err(format!(
-            "failed to fetch reference {chrom}:{}-{} (got length {len})",
+            "failed to fetch reference {chrom}:{}-{} (got length {})",
             start0 + 1,
-            end0
+            end0,
+            out.len()
         ));
     }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    let out = bytes
-        .iter()
-        .map(|b| b.to_ascii_uppercase())
-        .collect::<Vec<_>>();
-    unsafe { libc::free(ptr as *mut c_void) };
     Ok(out)
 }
 
@@ -1147,7 +1107,7 @@ fn run() -> Result<(), String> {
             return Err("--position-tsv and --event-tsv must be different paths".to_string());
         }
     }
-    let fai = load_fai(&cfg.reference)?;
+    let fai = Fai::from_path(&cfg.reference)?;
     let site_filter = build_site_filter(&cfg, &fai)?;
     let mut model = Model::default();
     if cfg.regions.is_empty() {

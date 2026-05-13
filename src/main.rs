@@ -1,4 +1,5 @@
 use libc::c_void;
+use phase_tools::io::fasta::Fai;
 use phase_tools::io::vcf::{OutputIndexKind, OutputIndexPolicy, OutputKind};
 use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{self, Read as BamRead};
@@ -319,15 +320,6 @@ impl Dsu {
             self.rank[ra] += 1;
         }
         true
-    }
-}
-
-struct Faidx(*mut htslib::faidx_t);
-impl Drop for Faidx {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { htslib::fai_destroy(self.0) };
-        }
     }
 }
 
@@ -1324,7 +1316,7 @@ fn edit_distance(a: &[u8], b: &[u8]) -> usize {
 
 fn realigned_read_allele_for_candidate(
     record: &bam::Record,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     candidate: &PhaseCandidate,
     min_baseq: u8,
     overhang: i64,
@@ -1414,7 +1406,7 @@ fn collect_read_phase_calls(
     record: &bam::Record,
     candidates: &[PhaseCandidate],
     candidates_by_pos0: &HashMap<i64, Vec<usize>>,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     min_baseq: u8,
     realign_overhang: i64,
 ) -> Vec<(usize, u8, u8)> {
@@ -1472,16 +1464,7 @@ fn collect_bam_phase_read_calls(
             .map_err(|e| format!("failed to enable BAM/CRAM threads for '{bam_path}': {e}"))?;
     }
 
-    let fasta = CString::new(cfg.fasta_path.as_bytes())
-        .map_err(|_| "FASTA path contains NUL".to_string())?;
-    let fai_ptr = unsafe { htslib::fai_load(fasta.as_ptr()) };
-    if fai_ptr.is_null() {
-        return Err(format!(
-            "cannot load or create FASTA index for '{}'",
-            cfg.fasta_path
-        ));
-    }
-    let fai = Faidx(fai_ptr);
+    let fai = Fai::from_path(&cfg.fasta_path)?;
 
     let rg_to_sample = bam_read_group_sample_map(bam.header());
     let mut by_chrom: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -1537,7 +1520,7 @@ fn collect_bam_phase_read_calls(
                 &record,
                 candidates,
                 &candidates_by_pos0,
-                fai.0,
+                &fai,
                 cfg.phase_min_baseq,
                 cfg.phase_realign_overhang,
             );
@@ -2926,43 +2909,19 @@ fn source_haplotypes_from_obs(obs: &[Obs]) -> Vec<SourceHaplotype> {
         .collect()
 }
 
-fn fetch_seq(
-    fai: *mut htslib::faidx_t,
-    chrom: &str,
-    start1: i64,
-    end1: i64,
-) -> Result<String, String> {
-    let c_chrom = CString::new(chrom.as_bytes()).map_err(|_| "contig contains NUL".to_string())?;
-    let mut len: htslib::hts_pos_t = 0;
-    let ptr = unsafe {
-        htslib::faidx_fetch_seq64(
-            fai,
-            c_chrom.as_ptr(),
-            (start1 - 1) as htslib::hts_pos_t,
-            (end1 - 1) as htslib::hts_pos_t,
-            &mut len,
-        )
-    };
-    let expected = end1 - start1 + 1;
-    if ptr.is_null() || len != expected as htslib::hts_pos_t {
-        unsafe {
-            if !ptr.is_null() {
-                libc::free(ptr as *mut c_void);
-            }
-        }
+fn fetch_seq(fai: &Fai, chrom: &str, start1: i64, end1: i64) -> Result<String, String> {
+    let bytes = fai.fetch_seq(chrom, start1, end1)?;
+    let expected = (end1 - start1 + 1) as usize;
+    if bytes.len() != expected {
         return Err(format!(
-            "failed to fetch reference {chrom}:{start1}-{end1} (got length {len})"
+            "failed to fetch reference {chrom}:{start1}-{end1} (got length {})",
+            bytes.len()
         ));
     }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    let s: String = bytes.iter().map(|&b| upbase(b) as char).collect();
-    unsafe {
-        libc::free(ptr as *mut c_void);
-    }
-    Ok(s)
+    Ok(bytes.iter().map(|&b| upbase(b) as char).collect())
 }
 
-fn fetch_left_base(fai: *mut htslib::faidx_t, chrom: &str, pos1: i64) -> Result<u8, String> {
+fn fetch_left_base(fai: &Fai, chrom: &str, pos1: i64) -> Result<u8, String> {
     let seq = fetch_seq(fai, chrom, pos1, pos1)?;
     Ok(seq.as_bytes()[0])
 }
@@ -2978,7 +2937,7 @@ fn fetch_left_base(fai: *mut htslib::faidx_t, chrom: &str, pos1: i64) -> Result<
 // non-empty. This makes our output left-aligned and parsimonious without an
 // external `vt normalize`/`bcftools norm` pass.
 fn normalize_biallelic(
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     chrom: &str,
     pos1: &mut i64,
     ref_seq: &mut String,
@@ -3030,7 +2989,7 @@ fn normalize_biallelic(
 fn add_call_from_block(
     cfg: &Config,
     header: &HeaderInfo,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     block: &[Obs],
     calls: &mut Vec<MnvCall>,
 ) -> Result<(), String> {
@@ -3115,7 +3074,7 @@ fn add_call_from_block(
 fn build_calls_proximity(
     cfg: &Config,
     header: &HeaderInfo,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     obs: &mut [Obs],
 ) -> Result<Vec<MnvCall>, String> {
     let mut calls = Vec::new();
@@ -3140,7 +3099,7 @@ fn build_calls_proximity(
 fn build_calls_nirvana_codon(
     cfg: &Config,
     header: &HeaderInfo,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     obs: &mut [Obs],
 ) -> Result<Vec<MnvCall>, String> {
     let mut calls = Vec::new();
@@ -3185,7 +3144,7 @@ fn build_calls_nirvana_codon(
 fn build_calls(
     cfg: &Config,
     header: &HeaderInfo,
-    fai: *mut htslib::faidx_t,
+    fai: &Fai,
     obs: &mut [Obs],
 ) -> Result<Vec<MnvCall>, String> {
     match cfg.mnv_algorithm {
@@ -4215,18 +4174,9 @@ fn run() -> Result<(), String> {
     }
     let (header, mut obs, mut st) = read_observations(&cfg)?;
 
-    let fasta = CString::new(cfg.fasta_path.as_bytes())
-        .map_err(|_| "FASTA path contains NUL".to_string())?;
-    let fai_ptr = unsafe { htslib::fai_load(fasta.as_ptr()) };
-    if fai_ptr.is_null() {
-        return Err(format!(
-            "cannot load or create FASTA index for '{}'",
-            cfg.fasta_path
-        ));
-    }
-    let fai = Faidx(fai_ptr);
+    let fai = Fai::from_path(&cfg.fasta_path)?;
 
-    let mut calls = build_calls(&cfg, &header, fai.0, &mut obs)?;
+    let mut calls = build_calls(&cfg, &header, &fai, &mut obs)?;
     merge_duplicate_calls(&mut calls);
 
     if cfg.emit_mode == EmitMode::Combined {

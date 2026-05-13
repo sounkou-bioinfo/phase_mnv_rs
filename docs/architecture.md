@@ -29,11 +29,11 @@ phase_tools::io::vcf
 ```
 
 `fermi_lite_assemble` and `phase_adjudicate` call the assembly module instead
-of path-including assembly code. `phase_adjudicate`, `bam_contamination`, and
-`bam_ancestry` share the FASTA/FAI wrapper instead of each owning a separate
-htslib `faidx` wrapper. `phase_mnv_rs` uses `phase_tools::io::vcf` for output
-format inference, self-index policy resolution, and htslib-backed VCF/BCF index
-creation.
+of path-including assembly code. `phase_mnv_rs`, `phase_adjudicate`,
+`bam_error_model`, `bam_contamination`, and `bam_ancestry` share the FASTA/FAI
+wrapper instead of each owning a separate htslib `faidx` wrapper.
+`phase_mnv_rs` uses `phase_tools::io::vcf` for output format inference,
+self-index policy resolution, and htslib-backed VCF/BCF index creation.
 
 ## Refactor rules
 
@@ -49,15 +49,13 @@ creation.
 ## Immediate extraction sequence
 
 1. Shared error/result helpers.
-2. Complete migration to the shared FASTA/FAI wrapper, including `phase_mnv_rs`
-   and `bam_error_model`.
-3. Continue moving VCF/BCF output, genotype, `PS`, and `HP` helpers into
+2. Continue moving VCF/BCF output, genotype, `PS`, and `HP` helpers into
    `phase_tools::io::vcf` / `phase_tools::variant`.
-4. BAM record filtering and base/event extraction.
-5. `phase_compare` comparison kernel.
-6. BAM phasing read collection, read selection, MEC, and greedy kernels.
-7. MNV/COMPLEX observation collection, construction, and writing.
-8. BAM/CRAM QC kernels for error, contamination, and ancestry tools.
+3. BAM record filtering and base/event extraction.
+4. `phase_compare` comparison kernel.
+5. BAM phasing read collection, read selection, MEC, and greedy kernels.
+6. MNV/COMPLEX observation collection, construction, and writing.
+7. BAM/CRAM QC kernels for error, contamination, and ancestry tools.
 
 ## Current caveats
 
