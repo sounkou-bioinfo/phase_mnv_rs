@@ -19,18 +19,21 @@ src/commands/          CLI adapters around library functions
 src/bin/               minimal binary entry points
 ```
 
-The first library boundaries are now in place for fermi-lite assembly and FASTA
-reference access:
+The first library boundaries are now in place for fermi-lite assembly, FASTA
+reference access, and VCF/BCF output-index policy:
 
 ```text
 phase_tools::assembly::fermi_lite
 phase_tools::io::fasta
+phase_tools::io::vcf
 ```
 
 `fermi_lite_assemble` and `phase_adjudicate` call the assembly module instead
 of path-including assembly code. `phase_adjudicate`, `bam_contamination`, and
 `bam_ancestry` share the FASTA/FAI wrapper instead of each owning a separate
-htslib `faidx` wrapper.
+htslib `faidx` wrapper. `phase_mnv_rs` uses `phase_tools::io::vcf` for output
+format inference, self-index policy resolution, and htslib-backed VCF/BCF index
+creation.
 
 ## Refactor rules
 
@@ -48,8 +51,9 @@ htslib `faidx` wrapper.
 1. Shared error/result helpers.
 2. Complete migration to the shared FASTA/FAI wrapper, including `phase_mnv_rs`
    and `bam_error_model`.
-3. BAM record filtering and base/event extraction.
-4. VCF/BCF genotype, `PS`, and `HP` parsing helpers.
+3. Continue moving VCF/BCF output, genotype, `PS`, and `HP` helpers into
+   `phase_tools::io::vcf` / `phase_tools::variant`.
+4. BAM record filtering and base/event extraction.
 5. `phase_compare` comparison kernel.
 6. BAM phasing read collection, read selection, MEC, and greedy kernels.
 7. MNV/COMPLEX observation collection, construction, and writing.

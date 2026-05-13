@@ -1,4 +1,5 @@
 use libc::c_void;
+use phase_tools::io::vcf::{OutputIndexKind, OutputIndexPolicy, OutputKind};
 use rust_htslib::bam::record::{Aux, Cigar};
 use rust_htslib::bam::{self, Read as BamRead};
 use rust_htslib::bcf::header::{HeaderRecord, HeaderView, TagType};
@@ -29,26 +30,6 @@ impl UnsupportedAllelesPolicy {
             UnsupportedAllelesPolicy::Fail => "fail",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputKind {
-    PlainVcf,
-    BgzfVcf,
-    Bcf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputIndexKind {
-    Csi,
-    Tbi,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputIndexPolicy {
-    Auto,
-    Off,
-    On(OutputIndexKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,32 +90,6 @@ impl EmitMode {
             EmitMode::Mnv => "mnv",
             EmitMode::Combined => "combined",
             EmitMode::AllSites => "all-sites",
-        }
-    }
-}
-
-impl OutputIndexKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            OutputIndexKind::Csi => "csi",
-            OutputIndexKind::Tbi => "tbi",
-        }
-    }
-
-    fn min_shift(self) -> i32 {
-        match self {
-            OutputIndexKind::Csi => 14,
-            OutputIndexKind::Tbi => 0,
-        }
-    }
-}
-
-impl OutputKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            OutputKind::PlainVcf => "vcf",
-            OutputKind::BgzfVcf => "vcf.gz",
-            OutputKind::Bcf => "bcf",
         }
     }
 }
@@ -965,67 +920,19 @@ fn output_label(cfg: &Config) -> &str {
 }
 
 fn infer_output_kind(cfg: &Config) -> OutputKind {
-    match cfg.output_path.as_deref() {
-        None | Some("-") => OutputKind::PlainVcf,
-        Some(path) => {
-            let lower = path.to_ascii_lowercase();
-            if lower.ends_with(".bcf") {
-                OutputKind::Bcf
-            } else if lower.ends_with(".vcf.gz") || lower.ends_with(".vcf.bgz") {
-                OutputKind::BgzfVcf
-            } else {
-                OutputKind::PlainVcf
-            }
-        }
-    }
+    phase_tools::io::vcf::infer_output_kind(cfg.output_path.as_deref())
 }
 
-fn index_error_message(code: i32) -> &'static str {
-    match code {
-        -1 => "indexing failed",
-        -2 => "opening output failed",
-        -3 => "format not indexable",
-        -4 => "failed to create or save the index",
-        _ => "unknown indexing error",
-    }
-}
-
-fn resolved_output_index(cfg: &Config) -> Option<OutputIndexKind> {
-    match cfg.output_index_policy {
-        OutputIndexPolicy::Off => None,
-        OutputIndexPolicy::On(kind) => Some(kind),
-        OutputIndexPolicy::Auto => match (cfg.output_path.as_deref(), infer_output_kind(cfg)) {
-            (Some(path), OutputKind::BgzfVcf | OutputKind::Bcf) if path != "-" => {
-                Some(OutputIndexKind::Csi)
-            }
-            _ => None,
-        },
-    }
+fn resolve_output_index(cfg: &Config) -> Result<Option<OutputIndexKind>, String> {
+    phase_tools::io::vcf::resolve_output_index(cfg.output_path.as_deref(), cfg.output_index_policy)
 }
 
 fn validate_index_request(cfg: &Config) -> Result<(), String> {
-    let OutputIndexPolicy::On(index_kind) = cfg.output_index_policy else {
-        return Ok(());
-    };
-    let Some(path) = cfg.output_path.as_deref().filter(|p| *p != "-") else {
-        return Err(
-            "--write-index requires -o/--output with .vcf.gz, .vcf.bgz, or .bcf output".to_string(),
-        );
-    };
-    match (infer_output_kind(cfg), index_kind) {
-        (OutputKind::PlainVcf, _) => Err(format!(
-            "--write-index cannot index plain VCF output '{path}'; use .vcf.gz, .vcf.bgz, or .bcf"
-        )),
-        (OutputKind::Bcf, OutputIndexKind::Tbi) => {
-            Err("--write-index=tbi is only valid for BGZF VCF; BCF output requires CSI".to_string())
-        }
-        (OutputKind::BgzfVcf | OutputKind::Bcf, OutputIndexKind::Csi)
-        | (OutputKind::BgzfVcf, OutputIndexKind::Tbi) => Ok(()),
-    }
+    resolve_output_index(cfg).map(|_| ())
 }
 
 fn index_output_if_requested(cfg: &Config) -> Result<(), String> {
-    let Some(index_kind) = resolved_output_index(cfg) else {
+    let Some(index_kind) = resolve_output_index(cfg)? else {
         return Ok(());
     };
     let path = cfg
@@ -1033,28 +940,7 @@ fn index_output_if_requested(cfg: &Config) -> Result<(), String> {
         .as_deref()
         .filter(|p| *p != "-")
         .ok_or_else(|| "--write-index requires file output".to_string())?;
-    let c_path = CString::new(path.as_bytes())
-        .map_err(|_| format!("output path contains NUL byte: {path}"))?;
-    let threads = cfg.threads.min(i32::MAX as usize) as i32;
-    let ret = unsafe {
-        htslib::bcf_index_build3(
-            c_path.as_ptr(),
-            std::ptr::null(),
-            index_kind.min_shift(),
-            threads,
-        )
-    };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "failed to build {} index for '{}': {} (htslib code {})",
-            index_kind.as_str(),
-            path,
-            index_error_message(ret),
-            ret
-        ))
-    }
+    phase_tools::io::vcf::build_index(path, index_kind, cfg.threads)
 }
 
 impl CodonMap {
@@ -4262,7 +4148,9 @@ fn print_summary(cfg: &Config, st: &Stats, sample: &str) {
         cfg.threads,
         cfg.emit_mode.as_str(),
         cfg.mnv_algorithm.as_str(),
-        resolved_output_index(cfg)
+        resolve_output_index(cfg)
+            .ok()
+            .flatten()
             .map(OutputIndexKind::as_str)
             .unwrap_or("none")
     );
