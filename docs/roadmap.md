@@ -100,6 +100,13 @@ DRAGEN targeted-caller design lessons to incorporate where appropriate:
 - clear warnings that targeted/high-homology callers require appropriate WGS-like
   coverage and are not reliable on arbitrary low-coverage or exome-only data
 
+Initial implemented foundation:
+
+- `phase_tools::mrjd` and `multi_region_joint_detect` provide a manifest-driven
+  SNV evidence scanner that groups candidate observations by homologous offset
+  across user-specified region groups and emits audit TSV diagnostics. This is a
+  bootstrap candidate-evidence layer, not a posterior caller.
+
 Initial non-goals:
 
 - claiming DRAGEN equivalence

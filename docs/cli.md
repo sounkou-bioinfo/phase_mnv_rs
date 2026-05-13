@@ -318,3 +318,32 @@ options:
 --include-supplementary Include supplementary alignments
 -h, --help                 Show this help
 ```
+
+## `multi_region_joint_detect`
+
+```text
+usage: multi_region_joint_detect --reference ref.fa --regions regions.tsv [options] reads.bam|reads.cram
+
+Initial multi-region SNV candidate evidence scanner. Regions sharing a group are
+compared by 1-based offset within each region, so homologous loci can be audited
+together before downstream joint genotyping. This is not a DRAGEN-equivalent
+caller and currently emits a TSV diagnostics table, not VCF. Depth/count totals
+are over alt-positive region observations; ref-only or uncovered copies are
+counted in region_count but omitted from per_region. Duplicate, QC-fail,
+secondary, and supplementary records are excluded. MAPQ 255 is excluded only
+when --min-mapq is greater than 0.
+
+regions.tsv columns:
+group<TAB>chrom<TAB>start<TAB>end[<TAB>copy]
+
+options:
+-r, --reference FILE       FASTA reference with .fai
+--regions FILE         Region manifest TSV
+--min-mapq N           Minimum read MAPQ (default: 0)
+--min-baseq N          Minimum base quality (default: 13)
+--min-alt-count N      Minimum per-region alt count (default: 2)
+--min-alt-fraction F   Minimum per-region alt fraction (default: 0.20)
+-@, --threads N            BAM/CRAM reader threads (default: 1)
+-o, --output FILE          Output TSV path (default: stdout)
+-h, --help                 Show this help
+```

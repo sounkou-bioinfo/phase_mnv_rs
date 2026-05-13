@@ -31,6 +31,7 @@ bam_error_model <- file.path("target", "release", "bam_error_model")
 phase_adjudicate <- file.path("target", "release", "phase_adjudicate")
 bam_contamination <- file.path("target", "release", "bam_contamination")
 bam_ancestry <- file.path("target", "release", "bam_ancestry")
+multi_region_joint_detect <- file.path("target", "release", "multi_region_joint_detect")
 
 fence <- function(x) {
   cat("```text\n")
@@ -88,4 +89,10 @@ fence(run_tool(bam_contamination))
 
 ```{r bam-ancestry-help, results='asis'}
 fence(run_tool(bam_ancestry))
+```
+
+## `multi_region_joint_detect`
+
+```{r multi-region-joint-detect-help, results='asis'}
+fence(run_tool(multi_region_joint_detect))
 ```

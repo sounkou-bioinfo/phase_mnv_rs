@@ -15,6 +15,7 @@ src/variant/           alleles, genotypes, phase tags, normalization helpers
 src/phase/             read-backed phasing, read selection, MEC/greedy kernels
 src/mnv/               MNV/COMPLEX construction and output helpers
 src/qc/                BAM/CRAM error, contamination, and ancestry kernels
+src/mrjd.rs            initial multi-region joint-detection kernels
 src/commands/          CLI adapters around library functions
 src/bin/               minimal binary entry points
 ```
@@ -26,6 +27,7 @@ reference access, and VCF/BCF output-index policy:
 phase_tools::assembly::fermi_lite
 phase_tools::io::fasta
 phase_tools::io::vcf
+phase_tools::mrjd
 ```
 
 `fermi_lite_assemble` and `phase_adjudicate` call the assembly module instead
