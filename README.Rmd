@@ -79,7 +79,10 @@ make compare-whatshap-phase # optional Linux WhatsHap comparison
 ```
 
 Output format is inferred from `-o/--output`: `.vcf`, `.vcf.gz`, `.vcf.bgz`, or
-`.bcf`; stdout is plain VCF. Use `--threads N` / `-@ N` for htslib/BGZF worker
+`.bcf`; stdout is plain VCF. Use `.vcf.gz`, `.vcf.bgz`, or `.bcf` when you need
+`bcftools index`. Plain `.vcf` output and stdout redirection are not indexable;
+do not write `phase_mnv_rs ... > out.vcf.gz` and expect a BGZF-indexable file.
+Use `-o out.vcf.gz` instead. Use `--threads N` / `-@ N` for htslib/BGZF worker
 threads.
 
 ## Minimal MNV example

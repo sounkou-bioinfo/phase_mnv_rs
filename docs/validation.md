@@ -33,8 +33,8 @@ Behavior fixtures cover:
   single-sample MEC dynamic-programming algorithm; additional generated-BAM
   phasing regressions run when `samtools` is available
 - Rust output format inference for plain VCF, BGZF-compressed VCF, and BCF,
-  including `--threads` plumbing for compressed input/output checks when
-  `bcftools` is available
+  including `bcftools index` checks for constructed MNV VCF.GZ/VCF.BGZ/BCF and
+  BAM-phased all-sites VCF.GZ output when `bcftools` is available
 - `bcftools norm -f ... -c x` checks that emitted MNV/COMPLEX records are not
   further realigned or mismatch-removed on tracked fixtures
 - Rust `--emit all-sites` header preservation: the original VCF header is kept
@@ -140,6 +140,40 @@ ALLOW_NONPERFECT=1 KEEP_TMP=1 make compare-whatshap-phase
 
 The script sanitizes generated VCF headers before comparison to remove command
 lines and local path-bearing records.
+
+## Current phasing-quality benchmark frame
+
+Tracked CI quality gates are deliberately small and deterministic. They require
+zero switch errors on the tiny WhatsHap comparison fixture and exercise both the
+MEC and greedy Rust phasing paths on synthetic BAM examples.
+
+Larger private replicate checks currently use three complementary metrics:
+
+1. within-run concordance against WhatsHap-phased output;
+2. pairwise replicate reproducibility across independent runs;
+3. switched-pair read/assembly adjudication for rows emitted by
+   `phase_compare --pair-tsv`.
+
+Recent private 13-run WES replicate summaries on two chromosomes were:
+
+| chromosome | comparison | method | assessed pairs | switch errors | switch rate |
+| --- | --- | --- | ---: | ---: | ---: |
+| 22 | within-run vs WhatsHap | `rust_greedy` | 2,639 | 21 | 0.007958 |
+| 22 | within-run vs WhatsHap | `rust_mec` | 2,639 | 25 | 0.009473 |
+| 1 | within-run vs WhatsHap | `rust_greedy` | 8,364 | 138 | 0.016499 |
+| 1 | within-run vs WhatsHap | `rust_mec` | 8,367 | 158 | 0.018884 |
+| 22 | pairwise replicate | WhatsHap | 13,225 | 77 | 0.005822 |
+| 22 | pairwise replicate | `rust_greedy` | 13,301 | 60 | 0.004511 |
+| 22 | pairwise replicate | `rust_mec` | 13,301 | 73 | 0.005488 |
+| 1 | pairwise replicate | WhatsHap | 42,395 | 899 | 0.021205 |
+| 1 | pairwise replicate | `rust_greedy` | 42,472 | 680 | 0.016011 |
+| 1 | pairwise replicate | `rust_mec` | 42,493 | 950 | 0.022357 |
+
+Interpretation: `rust_greedy` is currently the strongest reproducibility
+baseline on these private chromosomes, while `rust_mec` is closer to a
+WhatsHap-style exact objective and remains the target for read-selection and
+weighting improvements. These private numbers guide tuning; they are not a
+public benchmark claim.
 
 ## Local private replicate checks
 

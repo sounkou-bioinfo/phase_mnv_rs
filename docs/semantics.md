@@ -19,6 +19,19 @@ This document defines the currently supported semantics for the Rust-only
   haplotype/phase set. `--max-gap N` permits up to `N` unchanged reference bases
   between source variants.
 
+## Output and indexing model
+
+`phase_mnv_rs` infers output format only from `-o/--output`. Use `.vcf.gz`,
+`.vcf.bgz`, or `.bcf` for files that must be `bcftools index`-able. Plain
+`.vcf` output and stdout are intentionally ordinary uncompressed VCF and cannot
+be indexed by bcftools. In particular, shell redirection such as
+`phase_mnv_rs ... > out.vcf.gz` creates a plain VCF byte stream with a misleading
+file name; use `-o out.vcf.gz` to request BGZF-compressed VCF.
+
+Tracked output-format tests require constructed MNV VCF.GZ, VCF.BGZ, BCF, and
+BAM-phased all-sites VCF.GZ outputs to be readable and indexable by bcftools
+when bcftools is available.
+
 ## BAM-backed phasing
 
 The default mode consumes already phased VCF/BCF. The Rust binary also has an
