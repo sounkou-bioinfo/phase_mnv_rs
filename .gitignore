@@ -23,4 +23,6 @@
 *.vcf.gz.csi
 *.fai
 README.html
+__pycache__/
+*.pyc
 .DS_Store

@@ -175,6 +175,38 @@ WhatsHap-style exact objective and remains the target for read-selection and
 weighting improvements. These private numbers guide tuning; they are not a
 public benchmark claim.
 
+## Reproducibility matrix harness
+
+`scripts/phase_reproducibility_matrix.py` runs `phase_compare` over all
+within-method pairs in a manifest and writes both per-pair summaries and
+aggregate method-level metrics. The input manifest is a TSV with at least
+`method`, `run`, and `vcf` columns plus an optional `sample` column:
+
+```text
+method	run	vcf	sample
+whatshap	runA	runA.whatshap.vcf.gz	S1
+rust_greedy	runA	runA.rust_greedy.vcf.gz	S1
+rust_greedy	runB	runB.rust_greedy.vcf.gz	S1
+```
+
+Example invocation:
+
+```bash
+python3 scripts/phase_reproducibility_matrix.py \
+  --phase-compare target/release/phase_compare \
+  --manifest local_runs/repro/manifest.tsv \
+  --out-dir local_runs/repro/matrix \
+  --sample S1 \
+  --only-snvs \
+  --write-pairs
+```
+
+Relative `vcf` paths are resolved against the manifest directory. The harness
+writes `pairwise_long.tsv`, `summary_by_method.tsv`, individual
+`pairwise/*.summary.tsv` files, and optional `pairs/*.pairs.tsv` files for
+adjudication follow-up. It is intentionally data-agnostic and should be run with
+privacy-safe paths under ignored local directories.
+
 ## Local private replicate checks
 
 Larger non-committed checks are kept under ignored local output directories. One
