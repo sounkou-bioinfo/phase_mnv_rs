@@ -24,6 +24,27 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Ensure stable Rust toolchain wrappers
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/rust-wrapper"
+          cat > "$RUNNER_TEMP/rust-wrapper/cargo" <<'SH'
+          #!/usr/bin/env bash
+          exec rustup run stable cargo "$@"
+          SH
+          cat > "$RUNNER_TEMP/rust-wrapper/rustc" <<'SH'
+          #!/usr/bin/env bash
+          exec rustup run stable rustc "$@"
+          SH
+          cat > "$RUNNER_TEMP/rust-wrapper/rustfmt" <<'SH'
+          #!/usr/bin/env bash
+          exec rustup run stable rustfmt "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/rust-wrapper/cargo" "$RUNNER_TEMP/rust-wrapper/rustc" "$RUNNER_TEMP/rust-wrapper/rustfmt"
+          echo "$RUNNER_TEMP/rust-wrapper" >> "$GITHUB_PATH"
+          rustup run stable cargo --version
+          rustup run stable rustfmt --version
+
       - name: Install R for README generation
         uses: r-lib/actions/setup-r@v2
 
